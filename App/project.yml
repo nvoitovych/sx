@@ -1,0 +1,47 @@
+name: Sx
+options:
+  bundleIdPrefix: dev.nvlab
+  deploymentTarget:
+    macOS: "14.0"
+packages:
+  SxPackage:
+    path: ..
+targets:
+  Sx:
+    type: application
+    platform: macOS
+    sources:
+      - Sources
+      # `make cli` builds and signs ../build/sx first; Xcode re-signs on copy and keeps its identifier.
+      - path: ../build/sx
+        buildPhase:
+          copyFiles:
+            destination: wrapper
+            subpath: Contents/Helpers
+        attributes: [CodeSignOnCopy]
+    dependencies:
+      - package: SxPackage
+        product: SxCore
+    info:
+      path: Sources/Info.plist
+      properties:
+        LSUIElement: true
+        CFBundleDisplayName: sx
+        CFBundleShortVersionString: "0.2.0"
+        CFBundleVersion: "2"
+        LSApplicationCategoryType: public.app-category.developer-tools
+        NSHumanReadableCopyright: "© 2026 Nazar Voitovych"
+    entitlements:
+      path: Sources/Sx.entitlements
+      properties:
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)dev.nvlab.sx
+        com.apple.security.application-groups:
+          - 37A7P47GPA.dev.nvlab.sx
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: dev.nvlab.sx
+      PRODUCT_NAME: Sx
+      DEVELOPMENT_TEAM: 37A7P47GPA
+      CODE_SIGN_STYLE: Automatic
+      ENABLE_HARDENED_RUNTIME: YES
+      SWIFT_VERSION: "5.0"

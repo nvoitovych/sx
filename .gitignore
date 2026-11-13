@@ -1,0 +1,17 @@
+# Build output
+build/
+.build/
+.swiftpm/
+App/*.xcodeproj/
+design/out/
+*.dmg
+*.sha256
+# Local config and anything secret-shaped never belongs here
+.env
+.env.*
+!.env.sx
+*.pem
+*.p12
+*.p8
+*.key
+.DS_Store
