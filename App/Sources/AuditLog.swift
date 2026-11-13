@@ -30,7 +30,22 @@ final class AuditLog: ObservableObject {
 
     var path: String { url.path }
 
+    /// Last successful use per secret name, from the loaded history.
+    var lastUsed: [String: Date] {
+        var out: [String: Date] = [:]
+        for e in history where e.outcome.hasPrefix("released") || e.outcome == "signed" || e.outcome.hasPrefix("copied") {
+            for n in e.names where (out[n] ?? .distantPast) < e.time { out[n] = e.time }
+        }
+        return out
+    }
+
+    func setDemo(_ entries: [Entry]) {
+        recent = entries
+        history = entries
+    }
+
     func loadHistory() {
+        if Snapshot.isActive { return }
         queue.async {
             let dec = JSONDecoder()
             dec.dateDecodingStrategy = .iso8601

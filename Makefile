@@ -5,7 +5,7 @@ VERSION  := $(shell sed -n 's/.*version = "\(.*\)"/\1/p' Sources/SxCore/Constant
 DMG      := $(BUILD)/sx-$(VERSION).dmg
 APP      := $(BUILD)/export/Sx.app
 
-.PHONY: test icons cli app dmg dmg-only notarize-dmg release publish install uninstall clean
+.PHONY: test icons screenshots cli app dmg dmg-only notarize-dmg release publish install uninstall clean
 
 test:
 	swift test
@@ -16,6 +16,12 @@ icons:
 	rm -rf App/Sources/Assets.xcassets/AppIcon.appiconset
 	cp -R design/out/AppIcon.appiconset App/Sources/Assets.xcassets/
 	cp design/out/MenuIcon.png design/out/MenuIcon@2x.png App/Sources/Assets.xcassets/MenuIcon.imageset/
+
+# Marketing screenshots of the app's own views with demo data (no keychain, no screen recording).
+screenshots: cli
+	cd App && xcodegen generate --quiet
+	xcodebuild -project App/Sx.xcodeproj -scheme Sx -configuration Debug -derivedDataPath $(BUILD)/dd -allowProvisioningUpdates -quiet build
+	rm -rf design/shots && $(BUILD)/dd/Build/Products/Debug/Sx.app/Contents/MacOS/Sx --snapshot $(CURDIR)/design/shots
 
 # CLI: universal release build, signed so the broker accepts it (identifier + team are checked).
 cli:

@@ -33,6 +33,7 @@ final class Broker {
                     if errno == EINTR { continue }
                     break
                 }
+                UnixSocket.noSigPipe(fd)
                 workers.async { self.serve(fd) }
             }
         }
@@ -49,14 +50,17 @@ final class Broker {
             response = .fail("client rejected: \(problem)")
             AuditLog.shared.record(.init(time: Date(), op: "connect", client: peer.label, names: [], outcome: "rejected: \(problem)"))
         } else if let line = try? UnixSocket.readLine(fd), let req = try? Wire.decode(BrokerRequest.self, from: line) {
-            response = handle(req, peer: peer)
+            response = handle(req, peer: peer, fd: fd)
         } else {
             response = .fail("malformed request")
         }
         if let data = try? Wire.encode(response) { try? UnixSocket.writeAll(fd, data) }
     }
 
-    private func handle(_ req: BrokerRequest, peer: PeerIdentity) -> BrokerResponse {
+    private func handle(_ req: BrokerRequest, peer: PeerIdentity, fd: Int32) -> BrokerResponse {
+        func approve(_ card: ApprovalPanel.Request, reason: String, key: String?, clientFD: Int32? = nil) -> String? {
+            self.approve(card, reason: reason, key: key, clientFD: fd)
+        }
         func audit(_ names: [String], _ outcome: String) {
             AuditLog.shared.record(.init(time: Date(), op: req.op.rawValue, client: peer.label, agent: req.agent,
                                          command: req.argv?.joined(separator: " "), cwd: req.cwd, names: names, outcome: outcome))
@@ -78,8 +82,8 @@ final class Broker {
                 guard let name = req.name, SecretName.isValid(name) else { return .fail("invalid name") }
                 guard let b64 = req.value, let value = Data(base64Encoded: b64), !value.isEmpty else { return .fail("empty value") }
                 if KeychainStore.exists(name) {
-                    let who = req.agent.map { "\($0) (agent)" } ?? "Terminal"
-                    let card = ApprovalPanel.Request(title: "Overwrite a secret?", who: who, command: nil,
+                    let who = req.agent ?? "Terminal"
+                    let card = ApprovalPanel.Request(title: "wants to overwrite a key", who: who, isAgent: req.agent != nil, command: nil,
                                                      project: req.cwd, secrets: [name], alwaysAsk: true)
                     if let why = approve(card, reason: "\(who) wants to OVERWRITE secret \(name)", key: nil) {
                         audit([name], "denied overwrite: \(why)")
@@ -93,8 +97,8 @@ final class Broker {
 
             case .remove:
                 guard let name = req.name else { return .fail("name required") }
-                let who = req.agent.map { "\($0) (agent)" } ?? "Terminal"
-                let card = ApprovalPanel.Request(title: "Delete a secret?", who: who, command: nil,
+                let who = req.agent ?? "Terminal"
+                let card = ApprovalPanel.Request(title: "wants to delete a key", who: who, isAgent: req.agent != nil, command: nil,
                                                  project: req.cwd, secrets: [name], alwaysAsk: true)
                 if let why = approve(card, reason: "Delete secret \(name)", key: nil) {
                     audit([name], "denied delete: \(why)")
@@ -116,7 +120,7 @@ final class Broker {
                     return .fail("refused: \(why)")
                 }
                 let prod = names.contains { KeychainStore.tags($0).contains("prod") }
-                let who = req.agent.map { "\($0) (agent)" } ?? "Terminal"
+                let who = req.agent ?? "Terminal"
 
                 // Project allowlist: binding for agents once a human has trusted the file.
                 var preApproved = false
@@ -138,8 +142,10 @@ final class Broker {
                 if !(preApproved && !prod) {
                     let reason = "\(who) runs `\(argv.prefix(4).joined(separator: " "))` in \(((req.cwd ?? "?") as NSString).lastPathComponent) with \(shown.joined(separator: ", "))"
                     let key = prod ? nil : Approver.shared.key(cwd: req.cwd ?? "", argv: argv, names: names + external)
-                    let card = ApprovalPanel.Request(title: "Use secrets?", who: who, command: argv.joined(separator: " "),
-                                                     project: req.cwd, secrets: shown, alwaysAsk: prod)
+                    let card = ApprovalPanel.Request(title: "wants to use \(shown.count) \(shown.count == 1 ? "key" : "keys")", who: who, isAgent: req.agent != nil,
+                                                     command: argv.joined(separator: " "),
+                                                     project: req.cwd, secrets: shown, alwaysAsk: prod,
+                                                     note: "Keys go to this command only. Its output is masked.")
                     if let why = approve(card, reason: reason, key: key) {
                         audit(shown, "denied: \(why)")
                         return .fail("not approved: \(why)")
@@ -156,9 +162,9 @@ final class Broker {
                       let policy = try? ProjectPolicy.parse(String(decoding: data, as: UTF8.self)) else {
                     return .fail("cannot read or parse \(file)")
                 }
-                let who = req.agent.map { "\($0) (agent)" } ?? "Terminal"
+                let who = req.agent ?? "Terminal"
                 let allow = policy.allow.isEmpty ? "nothing" : policy.allow.joined(separator: " · ")
-                let card = ApprovalPanel.Request(title: "Trust this project's agent allowlist?", who: who,
+                let card = ApprovalPanel.Request(title: "wants you to trust this project's agent rules", who: who, isAgent: req.agent != nil,
                                                  command: "agents may run: \(allow)\(policy.require ? " (and nothing else)" : "")",
                                                  project: file, secrets: [], alwaysAsk: true)
                 if let why = approve(card, reason: "Trust \(file)", key: nil) {
@@ -175,16 +181,27 @@ final class Broker {
         }
     }
 
-    /// `key == nil` means always prompt. Returns nil when approved, otherwise why not.
-    func approve(_ card: ApprovalPanel.Request, reason: String, key: String?) -> String? {
+    /// `key == nil` means always prompt (no "remember" option). Returns nil when approved, otherwise why not.
+    func approve(_ card: ApprovalPanel.Request, reason: String, key: String?, clientFD: Int32? = nil) -> String? {
         if let key, Approver.shared.isApproved(key) { return nil }
         approvalGate.lock()
         defer { approvalGate.unlock() }
         if let key, Approver.shared.isApproved(key) { return nil }
         let reasonText = reason.count > 180 ? String(reason.prefix(177)) + "…" : reason
-        if let why = Approver.shared.authenticate(card, reason: reasonText) { return why }
-        if let key { Approver.shared.remember(key) }
+        let result = Approver.shared.authorize(card, reason: reasonText, offerRemember: key != nil,
+                                               isCancelled: { clientFD.map(Broker.peerClosed) ?? false })
+        if let why = result.error { return why }
+        if let key, result.remember { Approver.shared.remember(key, card: card) }
         return nil
+    }
+}
+
+extension Broker {
+    /// True once the other end of a waiting client socket has closed (e.g. the command was interrupted).
+    static func peerClosed(_ fd: Int32) -> Bool {
+        var byte: UInt8 = 0
+        let n = recv(fd, &byte, 1, MSG_PEEK | MSG_DONTWAIT)
+        return n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)
     }
 }
 

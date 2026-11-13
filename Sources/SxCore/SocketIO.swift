@@ -24,9 +24,16 @@ public enum UnixSocket {
         return addr
     }
 
+    /// Writing to a socket whose peer has gone must return EPIPE, not kill the process with SIGPIPE.
+    public static func noSigPipe(_ fd: Int32) {
+        var on: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
+    }
+
     public static func connect(_ path: String) throws -> Int32 {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw SocketError.system("socket", errno) }
+        noSigPipe(fd)
         var addr = try address(path)
         let len = socklen_t(MemoryLayout<sockaddr_un>.size)
         let rc = withUnsafePointer(to: &addr) {

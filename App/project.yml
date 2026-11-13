@@ -27,8 +27,8 @@ targets:
       properties:
         LSUIElement: true
         CFBundleDisplayName: sx
-        CFBundleShortVersionString: "0.2.0"
-        CFBundleVersion: "2"
+        CFBundleShortVersionString: "0.2.1"
+        CFBundleVersion: "3"
         LSApplicationCategoryType: public.app-category.developer-tools
         NSHumanReadableCopyright: "© 2026 Nazar Voitovych"
     entitlements:

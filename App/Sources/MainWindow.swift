@@ -42,6 +42,7 @@ final class SecretsModel: ObservableObject {
     @Published var error: String?
 
     func reload() {
+        if Snapshot.isActive { return }
         do {
             secrets = try KeychainStore.list()
             error = nil
@@ -65,7 +66,11 @@ enum Pane: String, CaseIterable, Identifiable {
 }
 
 struct MainView: View {
-    @State private var section: Pane? = .secrets
+    @State private var section: Pane?
+
+    init(initial: Pane = .secrets) {
+        _section = State(initialValue: initial)
+    }
 
     var body: some View {
         NavigationSplitView {
@@ -88,6 +93,7 @@ struct MainView: View {
 
 struct SecretsView: View {
     @ObservedObject private var model = SecretsModel.shared
+    @ObservedObject private var audit = AuditLog.shared
     @State private var query = ""
     @State private var selection: String?
     @State private var showAdd = false
@@ -103,11 +109,7 @@ struct SecretsView: View {
             if model.secrets.isEmpty {
                 EmptySecrets(add: { showAdd = true }, importEnv: { showImport = true })
             } else {
-                Table(filtered, selection: $selection) {
-                    TableColumn("Name") { s in Text(s.name).font(.system(.body, design: .monospaced)) }
-                    TableColumn("Tags") { s in Text(s.tags.joined(separator: ", ")).foregroundStyle(.secondary) }.width(90)
-                    TableColumn("Modified") { s in Text(s.modified?.formatted(date: .abbreviated, time: .shortened) ?? "—").foregroundStyle(.secondary) }.width(160)
-                }
+                SecretsTable(secrets: filtered, lastUsed: audit.lastUsed, selection: $selection)
                 .contextMenu(forSelectionType: String.self) { ids in
                     if let name = ids.first {
                         Button("Copy reference  sx://\(name)") { copy("sx://\(name)") }
@@ -132,7 +134,10 @@ struct SecretsView: View {
         }
         .sheet(isPresented: $showAdd) { AddSecretSheet { model.reload() } }
         .sheet(isPresented: $showImport) { ImportEnvSheet { msg in notice = msg; model.reload() } }
-        .onAppear { model.reload() }
+        .onAppear {
+            model.reload()
+            audit.loadHistory()
+        }
     }
 
     private func copy(_ s: String) {
@@ -142,7 +147,7 @@ struct SecretsView: View {
     }
 
     private func copyValue(_ name: String) {
-        let card = ApprovalPanel.Request(title: "Copy a secret value?", who: "You (sx window)", command: nil,
+        let card = ApprovalPanel.Request(title: "Copy the value to the clipboard?", who: "You", command: nil,
                                          project: nil, secrets: [name], alwaysAsk: true)
         DispatchQueue.global().async {
             if let why = Approver.shared.authenticate(card, reason: "Copy \(name) to the clipboard") {
@@ -168,7 +173,7 @@ struct SecretsView: View {
     }
 
     private func delete(_ name: String) {
-        let card = ApprovalPanel.Request(title: "Delete a secret?", who: "You (sx window)", command: nil,
+        let card = ApprovalPanel.Request(title: "Delete this key?", who: "You", command: nil,
                                          project: nil, secrets: [name], alwaysAsk: true)
         DispatchQueue.global().async {
             if let why = Approver.shared.authenticate(card, reason: "Delete secret \(name)") {
@@ -182,6 +187,52 @@ struct SecretsView: View {
                 model.reload()
             }
         }
+    }
+}
+
+/// Name with a muted project prefix, tags as badges, and when an agent or command last used it.
+struct SecretsTable: View {
+    let secrets: [SecretInfo]
+    let lastUsed: [String: Date]
+    @Binding var selection: String?
+
+    var body: some View {
+        Table(secrets, selection: $selection) {
+            TableColumn("Name") { s in SecretNameText(name: s.name) }
+            TableColumn("Tags") { s in
+                HStack(spacing: 4) { ForEach(s.tags, id: \.self) { TagBadge(tag: $0) } }
+            }.width(90)
+            TableColumn("Last used") { s in
+                if let d = lastUsed[s.name] {
+                    Text(d, format: .relative(presentation: .named)).foregroundStyle(.secondary)
+                } else {
+                    Text("never").foregroundStyle(.tertiary)
+                }
+            }.width(120)
+        }
+        .alternatingRowBackgrounds(.disabled)
+    }
+}
+
+struct SecretNameText: View {
+    let name: String
+
+    var body: some View {
+        let cut = name.lastIndex(of: "/").map { name.index(after: $0) } ?? name.startIndex
+        (Text(name[..<cut]).foregroundStyle(.secondary) + Text(name[cut...]))
+            .font(.system(.body, design: .monospaced))
+    }
+}
+
+struct TagBadge: View {
+    let tag: String
+
+    var body: some View {
+        let color: Color = tag == "prod" ? .orange : tag == "ssh" ? .blue : .gray
+        Text(tag).font(.caption2.weight(.semibold))
+            .padding(.horizontal, 6).padding(.vertical, 2)
+            .foregroundStyle(color)
+            .background(color.opacity(0.16), in: Capsule())
     }
 }
 
@@ -343,33 +394,153 @@ struct ImportEnvSheet: View {
 
 // MARK: - Activity
 
+/// Plain-language label, icon and color for an audit outcome.
+struct OutcomeStyle {
+    let label: String
+    let detail: String?
+    let symbol: String
+    let color: Color
+
+    init(_ outcome: String) {
+        func after(_ prefix: String) -> String? {
+            guard outcome.hasPrefix(prefix) else { return nil }
+            let rest = outcome.dropFirst(prefix.count).trimmingCharacters(in: CharacterSet(charactersIn: ": "))
+            return rest.isEmpty ? nil : rest.replacingOccurrences(of: "`", with: "")
+        }
+        switch true {
+        case outcome.hasPrefix("released") && outcome.contains(".sx.toml"):
+            (label, detail, symbol, color) = ("Allowed", "by project rules", "checkmark.circle.fill", .green)
+        case outcome.hasPrefix("released"):
+            (label, detail, symbol, color) = ("Allowed", nil, "checkmark.circle.fill", .green)
+        case outcome == "signed":
+            (label, detail, symbol, color) = ("Signed", nil, "checkmark.circle.fill", .green)
+        case outcome.hasPrefix("refused"):
+            (label, detail, symbol, color) = ("Blocked", after("refused"), "hand.raised.fill", .red)
+        case outcome.contains("denied by user"):
+            (label, detail, symbol, color) = ("Denied by you", nil, "xmark.circle.fill", .orange)
+        case outcome.contains("timed out"):
+            (label, detail, symbol, color) = ("Not answered", "auto-denied", "clock.badge.xmark", .orange)
+        case outcome.hasPrefix("denied"):
+            (label, detail, symbol, color) = ("Denied", after("denied"), "xmark.circle.fill", .orange)
+        case outcome == "stored":
+            (label, detail, symbol, color) = ("Saved", nil, "tray.and.arrow.down.fill", .blue)
+        case outcome == "deleted":
+            (label, detail, symbol, color) = ("Deleted", nil, "trash.fill", .secondary)
+        case outcome.hasPrefix("trusted"):
+            (label, detail, symbol, color) = ("Project rules trusted", after("trusted"), "checkmark.shield.fill", .green)
+        case outcome.hasPrefix("rejected"):
+            (label, detail, symbol, color) = ("Unknown program refused", after("rejected"), "exclamationmark.octagon.fill", .red)
+        case outcome.hasPrefix("copied"):
+            (label, detail, symbol, color) = ("Copied by you", nil, "doc.on.doc.fill", .blue)
+        default:
+            (label, detail, symbol, color) = (outcome.prefix(1).uppercased() + outcome.dropFirst(), nil, "circle", .secondary)
+        }
+    }
+}
+
+struct AgentBadge: View {
+    let name: String
+
+    var body: some View {
+        Text(name).font(.caption2.weight(.semibold))
+            .padding(.horizontal, 6).padding(.vertical, 2)
+            .background(Color.purple.opacity(0.2), in: Capsule())
+    }
+}
+
 struct ActivityRow: View {
     let entry: AuditLog.Entry
     var compact = false
 
-    private var bad: Bool { entry.outcome.hasPrefix("denied") || entry.outcome.hasPrefix("refused") || entry.outcome.hasPrefix("rejected") }
+    var body: some View {
+        let style = OutcomeStyle(entry.outcome)
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Image(systemName: style.symbol).foregroundStyle(style.color).font(compact ? .caption : .body)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Text(style.label).fontWeight(.semibold)
+                    if let d = style.detail { Text(d).foregroundStyle(.secondary).lineLimit(1) }
+                    Spacer(minLength: 8)
+                    Text(entry.time.formatted(date: .omitted, time: .shortened)).foregroundStyle(.secondary).monospacedDigit()
+                }
+                .font(compact ? .caption : .callout)
+                HStack(spacing: 6) {
+                    if let agent = entry.agent { AgentBadge(name: agent) }
+                    if let cmd = entry.command { Text(cmd).font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1) }
+                }
+                if !entry.names.isEmpty {
+                    if compact {
+                        Text(entry.names.joined(separator: ", ")).font(.system(.caption2, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1)
+                    } else {
+                        FlowChips(items: entry.names)
+                    }
+                }
+            }
+        }
+        .padding(.vertical, compact ? 0 : 4)
+    }
+}
+
+struct GrantRow: View {
+    let grant: Approver.Grant
+    var onRevoke: (() -> Void)?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 1) {
-            HStack {
-                Text(entry.time.formatted(date: compact ? .omitted : .abbreviated, time: .shortened)).foregroundStyle(.secondary)
-                Text(entry.op).fontWeight(.medium)
-                Text(entry.outcome).foregroundStyle(bad ? .red : .primary).lineLimit(1)
-            }.font(.caption)
-            Text([entry.agent.map { "agent: \($0)" }, entry.command, entry.names.isEmpty ? nil : entry.names.joined(separator: ", ")]
-                .compactMap { $0 }.joined(separator: " · "))
-                .font(.caption2).foregroundStyle(.secondary).lineLimit(compact ? 1 : 2)
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Image(systemName: "clock.fill").foregroundStyle(.blue)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Text(grant.who).fontWeight(.semibold)
+                    Text(grant.command).font(.system(.callout, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1)
+                }
+                FlowChips(items: grant.names)
+            }
+            Spacer()
+            Text("until \(grant.until.formatted(date: .omitted, time: .shortened))").font(.caption).foregroundStyle(.secondary)
+            if let onRevoke { Button("Revoke", action: onRevoke) }
         }
+        .padding(.vertical, 4)
+    }
+}
+
+enum DayGroups {
+    static func group(_ entries: [AuditLog.Entry]) -> [(title: String, entries: [AuditLog.Entry])] {
+        let cal = Calendar.current
+        var out: [(String, [AuditLog.Entry])] = []
+        for e in entries {
+            let title = cal.isDateInToday(e.time) ? "Today" : cal.isDateInYesterday(e.time) ? "Yesterday"
+                : e.time.formatted(date: .abbreviated, time: .omitted)
+            if out.last?.0 == title { out[out.count - 1].1.append(e) } else { out.append((title, [e])) }
+        }
+        return out
     }
 }
 
 struct ActivityView: View {
     @ObservedObject private var audit = AuditLog.shared
+    @State private var grants = Approver.shared.active
 
     var body: some View {
         List {
+            if !grants.isEmpty {
+                Section {
+                    ForEach(grants) { g in
+                        GrantRow(grant: g) { Approver.shared.revoke(g.id) }
+                    }
+                } header: {
+                    HStack {
+                        Text("Remembered approvals")
+                        Spacer()
+                        Button("Revoke all") { Approver.shared.revokeAll() }.buttonStyle(.link)
+                    }
+                }
+            }
             if audit.history.isEmpty { Text("No activity yet.").foregroundStyle(.secondary) }
-            ForEach(audit.history) { ActivityRow(entry: $0) }
+            ForEach(DayGroups.group(audit.history), id: \.title) { day in
+                Section(day.title) {
+                    ForEach(day.entries) { ActivityRow(entry: $0) }
+                }
+            }
         }
         .navigationTitle("Activity")
         .toolbar {
@@ -377,7 +548,11 @@ struct ActivityView: View {
                 Label("Show log file", systemImage: "doc.text.magnifyingglass")
             }
         }
-        .onAppear { audit.loadHistory() }
+        .onAppear {
+            audit.loadHistory()
+            grants = Approver.shared.active
+        }
+        .onReceive(NotificationCenter.default.publisher(for: Approver.changed)) { _ in grants = Approver.shared.active }
     }
 }
 

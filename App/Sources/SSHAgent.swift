@@ -24,6 +24,7 @@ final class SSHAgent {
                     if errno == EINTR { continue }
                     break
                 }
+                UnixSocket.noSigPipe(fd)
                 workers.async { self.serve(fd) }
             }
         }
@@ -48,7 +49,7 @@ final class SSHAgent {
         var len = socklen_t(MemoryLayout<pid_t>.size)
         getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &pid, &len)
         while let message = readMessage(fd) {
-            let reply = handle(message, peer: pid)
+            let reply = handle(message, peer: pid, fd: fd)
             var w = SSHWriter()
             w.uint32(UInt32(reply.count))
             guard (try? UnixSocket.writeAll(fd, w.data + reply)) != nil else { return }
@@ -74,7 +75,7 @@ final class SSHAgent {
         return out
     }
 
-    private func handle(_ message: Data, peer: pid_t) -> Data {
+    private func handle(_ message: Data, peer: pid_t, fd: Int32) -> Data {
         let failure = Data([SSHAgentMessage.failure])
         var r = SSHReader(message)
         guard let type = try? r.byte() else { return failure }
@@ -97,12 +98,13 @@ final class SSHAgent {
 
             let ancestry = AgentDetect.ancestry(from: peer).prefix(5).map { ($0 as NSString).lastPathComponent }
             let agent = AgentDetect.detect(pid: peer)
-            let who = agent.map { "\($0) (agent)" } ?? "Terminal"
+            let who = agent ?? "Terminal"
             let prod = KeychainStore.tags(k.name).contains("prod")
-            let card = ApprovalPanel.Request(title: "Use SSH key?", who: who, command: ancestry.joined(separator: " ← "),
+            let card = ApprovalPanel.Request(title: "wants to sign in with an SSH key", who: who, isAgent: agent != nil,
+                                             command: ancestry.joined(separator: " ← "),
                                              project: nil, secrets: [k.name], alwaysAsk: prod)
             let key = prod ? nil : Approver.shared.key(cwd: "ssh", argv: [agent ?? "human"], names: [k.name])
-            if let why = Broker.shared.approve(card, reason: "\(who) wants to sign with \(k.name)", key: key) {
+            if let why = Broker.shared.approve(card, reason: "\(who) wants to sign with \(k.name)", key: key, clientFD: fd) {
                 AuditLog.shared.record(.init(time: Date(), op: "ssh-sign", client: ancestry.first ?? "?", agent: agent,
                                              command: ancestry.joined(separator: " ← "), names: [k.name], outcome: "denied: \(why)"))
                 return failure

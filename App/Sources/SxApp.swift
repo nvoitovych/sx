@@ -18,6 +18,12 @@ struct SxApp: App {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // A client that exits mid-request must not take the broker down with SIGPIPE.
+        signal(SIGPIPE, SIG_IGN)
+        if Snapshot.isActive {
+            Snapshot.run()
+            return
+        }
         Broker.shared.start()
         SSHAgent.shared.start()
         // `sx` starts the app with --background when it only needs the broker.
