@@ -85,33 +85,17 @@ final class Approver {
     /// Like `authenticate`, and reports whether the user chose a timed ("remember") approval.
     func authorize(_ request: ApprovalPanel.Request, reason: String, offerRemember: Bool,
                    isCancelled: @escaping () -> Bool = { false }) -> (error: String?, remember: Bool) {
-        let ctx = LAContext()
-        ctx.localizedCancelTitle = "Deny"
-        var error: NSError?
-        guard ctx.canEvaluatePolicy(.deviceOwnerAuthentication, error: &error) else {
-            return ("authentication unavailable: \(error?.localizedDescription ?? "unknown")", false)
-        }
         /// Written on the main thread, read after the semaphore; a class so late answers never touch freed memory.
-        final class Outcome { var failure: String? = "timed out waiting for approval"; var remember = false }
-        let outcome = Outcome()
+        final class Box { var outcome: ApprovalPanel.Outcome? }
+        let box = Box()
         let done = DispatchSemaphore(value: 0)
         DispatchQueue.main.async {
             var card = request
             card.expires = Date().addingTimeInterval(Self.answerTimeout)
             card.rememberHours = offerRemember ? self.rememberHours : 0
-            ApprovalPanel.show(card) { decision in
-                outcome.remember = decision == .remember
-                guard decision != .deny else {
-                    outcome.failure = "denied by user"
-                    done.signal()
-                    return
-                }
-                // The click made the app active, so the system prompt is not cancelled.
-                NSApp.activate()
-                ctx.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason) { ok, err in
-                    outcome.failure = ok ? nil : (err as NSError?).map { "\($0.localizedDescription) (\($0.code))" } ?? "denied"
-                    done.signal()
-                }
+            ApprovalPanel.show(card, reason: reason) { outcome in
+                box.outcome = outcome
+                done.signal()
             }
         }
         // Wait in short slices so a request whose client has gone away does not hold the card (and the queue).
@@ -119,11 +103,15 @@ final class Approver {
         while done.wait(timeout: .now() + 0.5) == .timedOut {
             let cancelled = isCancelled()
             if cancelled || Date() >= deadline {
-                ctx.invalidate()
                 DispatchQueue.main.async { ApprovalPanel.dismiss() }
                 return (cancelled ? "the requesting program exited" : "timed out waiting for approval", false)
             }
         }
-        return (outcome.failure, outcome.remember)
+        switch box.outcome {
+        case let .approved(remember)?: return (nil, remember)
+        case .denied?: return ("denied by user", false)
+        case let .failed(why)?: return (why, false)
+        case nil: return ("no answer", false)
+        }
     }
 }

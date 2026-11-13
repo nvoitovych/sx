@@ -59,6 +59,9 @@ enum Snapshot {
             render(Framed { ShotWindow(selected: .activity) { ShotActivity() } }, size: nil, titled: false, to: "\(dir)/activity-\(suffix).png")
             render(Framed { ShotWindow(selected: .cli) { CommandLineView() } }, size: nil, titled: false, to: "\(dir)/cli-\(suffix).png")
             render(Framed { ShotWindow(selected: .settings) { SettingsView() } }, size: nil, titled: false, to: "\(dir)/settings-\(suffix).png")
+            render(Framed { TagEditorSheet(secret: demoSecrets[1], onDone: { _ in })
+                .background(Color(nsColor: .windowBackgroundColor)).clipShape(RoundedRectangle(cornerRadius: 12)) },
+                   size: nil, titled: false, to: "\(dir)/tags-\(suffix).png")
             let card = ApprovalPanel.Request(title: "wants to use 2 keys", who: "Claude Code", isAgent: true, command: "npm run deploy",
                                              project: "~/code/myapp", secrets: ["myapp/STRIPE_KEY", "cloudflare/API_TOKEN"], alwaysAsk: false,
                                              expires: Date().addingTimeInterval(118),

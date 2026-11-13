@@ -1,7 +1,7 @@
 import Foundation
 
 public enum SX {
-    public static let version = "0.2.1"
+    public static let version = "0.2.2"
     public static let teamID = "37A7P47GPA"
     public static let appBundleID = "dev.nvlab.sx"
     public static let cliIdentifier = "dev.nvlab.sx.cli"

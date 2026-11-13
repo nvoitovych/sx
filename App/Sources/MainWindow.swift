@@ -98,6 +98,7 @@ struct SecretsView: View {
     @State private var selection: String?
     @State private var showAdd = false
     @State private var showImport = false
+    @State private var editingTags: SecretInfo?
     @State private var notice: String?
 
     private var filtered: [SecretInfo] {
@@ -112,6 +113,7 @@ struct SecretsView: View {
                 SecretsTable(secrets: filtered, lastUsed: audit.lastUsed, selection: $selection)
                 .contextMenu(forSelectionType: String.self) { ids in
                     if let name = ids.first {
+                        Button("Edit tags…") { editingTags = model.secrets.first { $0.name == name } }
                         Button("Copy reference  sx://\(name)") { copy("sx://\(name)") }
                         Button("Copy value (Touch ID, clears in 30 s)") { copyValue(name) }
                         Divider()
@@ -134,6 +136,9 @@ struct SecretsView: View {
         }
         .sheet(isPresented: $showAdd) { AddSecretSheet { model.reload() } }
         .sheet(isPresented: $showImport) { ImportEnvSheet { msg in notice = msg; model.reload() } }
+        .sheet(item: $editingTags) { secret in
+            TagEditorSheet(secret: secret) { msg in notice = msg; model.reload() }
+        }
         .onAppear {
             model.reload()
             audit.loadHistory()
@@ -233,6 +238,105 @@ struct TagBadge: View {
             .padding(.horizontal, 6).padding(.vertical, 2)
             .foregroundStyle(color)
             .background(color.opacity(0.16), in: Capsule())
+    }
+}
+
+/// Add or remove tags. Dropping `prod` weakens protection, so it needs Touch ID; everything else does not.
+struct TagEditorSheet: View {
+    let secret: SecretInfo
+    var onDone: (String) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var tags: [String] = []
+    @State private var newTag = ""
+    @State private var busy = false
+    @State private var error: String?
+
+    static let suggested = ["prod", "ssh", "legacy", "dev"]
+    static let hints = ["prod": "Touch ID every time", "ssh": "offered by the SSH agent", "legacy": "old, kept just in case", "dev": "development key"]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Tags").font(.headline)
+            SecretNameText(name: secret.name)
+
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(Self.suggested, id: \.self) { tag in
+                    Toggle(isOn: Binding(get: { tags.contains(tag) }, set: { on in toggle(tag, on) })) {
+                        HStack(spacing: 6) {
+                            TagBadge(tag: tag)
+                            Text(Self.hints[tag] ?? "").font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+
+            let custom = tags.filter { !Self.suggested.contains($0) }
+            if !custom.isEmpty {
+                HStack(spacing: 6) {
+                    ForEach(custom, id: \.self) { tag in
+                        Button { toggle(tag, false) } label: {
+                            HStack(spacing: 3) { TagBadge(tag: tag); Image(systemName: "xmark").font(.caption2) }
+                        }.buttonStyle(.plain)
+                    }
+                }
+            }
+            HStack {
+                TextField("New tag", text: $newTag).onSubmit(addCustom).frame(maxWidth: 200)
+                Button("Add", action: addCustom).disabled(!Self.isValid(newTag))
+            }
+            if let error { Text(error).font(.caption).foregroundStyle(.red) }
+
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("Save", action: save).keyboardShortcut(.defaultAction).disabled(busy)
+            }
+        }
+        .padding(20)
+        .frame(width: 380)
+        .onAppear { tags = secret.tags }
+    }
+
+    static func isValid(_ t: String) -> Bool {
+        let t = t.trimmingCharacters(in: .whitespaces).lowercased()
+        return !t.isEmpty && t.count <= 24 && t.allSatisfy { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" }
+    }
+
+    private func toggle(_ tag: String, _ on: Bool) {
+        if on { if !tags.contains(tag) { tags.append(tag) } } else { tags.removeAll { $0 == tag } }
+    }
+
+    private func addCustom() {
+        let t = newTag.trimmingCharacters(in: .whitespaces).lowercased()
+        guard Self.isValid(t) else { return }
+        toggle(t, true)
+        newTag = ""
+    }
+
+    private func save() {
+        let final = tags
+        let name = secret.name
+        let downgrade = secret.tags.contains("prod") && !final.contains("prod")
+        busy = true
+        DispatchQueue.global().async {
+            if downgrade {
+                let card = ApprovalPanel.Request(title: "Remove the prod tag?", who: "You", command: nil, project: nil,
+                                                 secrets: [name], alwaysAsk: true,
+                                                 note: "Without it, an approved command can reuse this key for hours.")
+                if let why = Approver.shared.authenticate(card, reason: "Remove prod from \(name)") {
+                    DispatchQueue.main.async { error = "Not changed: \(why)"; busy = false }
+                    return
+                }
+            }
+            do {
+                try KeychainStore.setTags(name, final)
+                AuditLog.shared.record(.init(time: Date(), op: "tags", client: "sx window", names: [name],
+                                             outcome: "tagged \(final.isEmpty ? "(none)" : final.joined(separator: ", "))"))
+                DispatchQueue.main.async { onDone("Tags of \(name): \(final.isEmpty ? "none" : final.joined(separator: ", "))"); dismiss() }
+            } catch {
+                DispatchQueue.main.async { self.error = "\(error)"; busy = false }
+            }
+        }
     }
 }
 
@@ -430,6 +534,8 @@ struct OutcomeStyle {
             (label, detail, symbol, color) = ("Project rules trusted", after("trusted"), "checkmark.shield.fill", .green)
         case outcome.hasPrefix("rejected"):
             (label, detail, symbol, color) = ("Unknown program refused", after("rejected"), "exclamationmark.octagon.fill", .red)
+        case outcome.hasPrefix("tagged"):
+            (label, detail, symbol, color) = ("Tags changed", after("tagged"), "tag.fill", .blue)
         case outcome.hasPrefix("exported"):
             (label, detail, symbol, color) = ("Exported by you", "to a file", "square.and.arrow.up.fill", .blue)
         case outcome.hasPrefix("copied"):
