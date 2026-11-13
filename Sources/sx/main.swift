@@ -6,15 +6,17 @@ let usage = """
 sx \(SX.version) — secrets exec. Agents can use secrets; nobody sees them in files or output.
 
 Run
-  sx run [--env-file F] [--env K=sx://name] [--no-mask] -- cmd [args]
+  sx run [--env-file F] [--env K=sx://name] [--file PATH] [--no-mask] -- cmd [args]
                                     run cmd with secrets from .env.sx (default) in its env;
-                                    secret values are masked in its output
+                                    secret values are masked in its output. --file also writes them
+                                    as dotenv to PATH (mode 600) for the run only, e.g. wrangler's .dev.vars
 Keychain secrets
   sx put NAME [--tag T] [--file P]  store a secret (value from --file, stdin, or hidden prompt)
-  sx import-env FILE --prefix P [--out F] [--tag T] [--remove-original]
+  sx import-env FILE --prefix P [--out F] [--tag T] [--literal K1,K2] [--dedupe-with P2] [--remove-original]
                                     move a dotenv file into sx; writes .env.sx with references
   sx import-file PATH --name NAME [--tag T] [--remove-original]
   sx verify NAME (--file P | stdin) compare by hash, never by value
+  sx export NAME --out PATH         write a key file back to disk (human-only, Touch ID)
   sx ls [--vault V] [--json]        list secret names
   sx rm NAME                        delete a secret (Touch ID)
 Vaults (~/.config/sx/config.toml)
@@ -45,7 +47,7 @@ struct Flags {
     var values: [String: [String]] = [:]
     var switches: Set<String> = []
 
-    static let valued: Set<String> = ["--tag", "--file", "--prefix", "--out", "--name"]
+    static let valued: Set<String> = ["--tag", "--file", "--prefix", "--out", "--name", "--literal", "--dedupe-with", "--vault"]
 
     init(_ args: [String]) throws {
         var i = 0
@@ -142,10 +144,22 @@ func main() throws -> Int32 {
         let out = f.one("--out") ?? ((path as NSString).deletingLastPathComponent as NSString).appendingPathComponent(SX.defaultEnvFile)
         var existing = (try? String(contentsOfFile: out, encoding: .utf8)).map(EnvFile.parse) ?? []
         var imported = 0
+        // Non-secret settings stay plain text in .env.sx.
+        let literal = Set(f.all("--literal").flatMap { $0.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) } })
+        // Same KEY with the same value already stored under another prefix → reference it instead of a copy.
+        let dedupePrefixes = f.all("--dedupe-with")
+        let existingNames = dedupePrefixes.isEmpty ? [] : Set((try Client.call(BrokerRequest(op: .list)).secrets ?? []).map(\.name))
         for e in EnvFile.parse(text) {
             let entry: EnvFile.Entry
-            if e.reference != nil || e.value.isEmpty {
+            if e.reference != nil || e.value.isEmpty || literal.contains(e.key) {
                 entry = e
+                if literal.contains(e.key) { print("· \(e.key) kept as plain text") }
+            } else if let twin = try dedupePrefixes.map({ "\($0)/\(e.key)" }).first(where: { name in
+                guard existingNames.contains(name) else { return false }
+                return try Client.call(BrokerRequest(op: .hash, name: name)).hash == shortHash(Data(e.value.utf8))
+            }) {
+                entry = EnvFile.Entry(key: e.key, value: SX.refScheme + twin)
+                print("= \(e.key) → \(SX.refScheme)\(twin) (same value, reused)")
             } else {
                 let name = "\(prefix)/\(e.key)"
                 try put(name, Data(e.value.utf8), tags: f.all("--tag"))
@@ -159,6 +173,22 @@ func main() throws -> Int32 {
             .write(toFile: out, atomically: true, encoding: .utf8)
         if f.switches.contains("--remove-original") { try secureRemove(path) }
         print("\(imported) secrets imported; wrote \(out)\(f.switches.contains("--remove-original") ? "; removed \(path)" : "")")
+
+    case "export":
+        // Restores a key file (signing key, .p12, .netrc …). Human-only, Touch ID every time.
+        let f = try Flags(args)
+        guard let name = f.positional.first, let out = f.one("--out") else { throw CLIError("usage: sx export NAME --out PATH [--force]") }
+        if let agent = AgentDetect.detect() { throw CLIError("refused for \(agent): export is human-only", code: 126) }
+        let path = (out as NSString).expandingTildeInPath
+        if FileManager.default.fileExists(atPath: path), !f.switches.contains("--force") { throw CLIError("\(out) exists (use --force)") }
+        let resp = try Client.call(BrokerRequest(op: .reveal, name: name, argv: ["sx", "export", name, "--out", out],
+                                                 cwd: FileManager.default.currentDirectoryPath, agent: nil))
+        guard let data = resp.values?[name].flatMap({ Data(base64Encoded: $0) }) else { throw CLIError("no value returned") }
+        try FileManager.default.createDirectory(atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+        guard FileManager.default.createFile(atPath: path, contents: data, attributes: [.posixPermissions: 0o600]) else {
+            throw CLIError("cannot write \(out)")
+        }
+        print("✓ \(name) → \(out) (mode 600)")
 
     case "verify":
         let f = try Flags(args)

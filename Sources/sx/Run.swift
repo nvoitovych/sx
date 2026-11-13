@@ -8,6 +8,8 @@ enum Run {
         var envFiles: [String] = []
         var inline: [EnvFile.Entry] = []
         var mask = true
+        /// Dotenv files written for the command's lifetime (for tools that read files, e.g. wrangler's .dev.vars).
+        var files: [String] = []
         var argv: [String] = []
     }
 
@@ -32,6 +34,10 @@ enum Run {
                 i += 1
             case "--no-mask":
                 o.mask = false
+            case "--file":
+                guard i + 1 < args.count else { throw CLIError("--file needs a path") }
+                o.files.append(args[i + 1])
+                i += 1
             default:
                 if a.hasPrefix("-") { throw CLIError("unknown option \(a)") }
                 o.argv = Array(args[i...])
@@ -40,7 +46,7 @@ enum Run {
             }
             i += 1
         }
-        guard !o.argv.isEmpty else { throw CLIError("usage: sx run [--env-file F] [--env K=sx://name] -- command [args]") }
+        guard !o.argv.isEmpty else { throw CLIError("usage: sx run [--env-file F] [--env K=sx://name] [--file PATH] -- command [args]") }
         if o.envFiles.isEmpty, FileManager.default.fileExists(atPath: SX.defaultEnvFile) {
             o.envFiles = [SX.defaultEnvFile]
         }
@@ -63,6 +69,10 @@ enum Run {
         entries += o.inline
 
         let cwd = FileManager.default.currentDirectoryPath
+        // Refuse before asking for approval: never overwrite a file that may hold plain values.
+        for path in o.files where FileManager.default.fileExists(atPath: path) {
+            throw CLIError("\(path) already exists. sx creates it for the run and deletes it after — move the existing file away first")
+        }
         let resolved = try Resolver.resolve(entries: entries, argv: o.argv, cwd: cwd, agent: agent)
         var env = ProcessInfo.processInfo.environment
         for e in entries where e.reference == nil { env[e.key] = e.value }
@@ -71,6 +81,23 @@ enum Run {
             guard let str = String(data: data, encoding: .utf8) else { throw CLIError("\(key) is binary; it cannot go into an environment variable") }
             env[key] = str
             secrets[key] = data
+        }
+        var written: [String] = []
+        defer { for path in written { unlink(path) } }
+        if !o.files.isEmpty {
+            let pairs = entries.compactMap { e -> (String, String)? in
+                if e.reference == nil { return (e.key, e.value) }
+                return resolved[e.key].flatMap { String(data: $0, encoding: .utf8) }.map { (e.key, $0) }
+            }
+            let body = Data(EnvFile.renderQuoted(pairs).utf8)
+            for path in o.files {
+                // O_EXCL: if something appeared meanwhile, fail instead of clobbering it.
+                let fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0o600)
+                guard fd >= 0 else { throw CLIError("cannot create \(path): \(String(cString: strerror(errno)))") }
+                written.append(path)
+                try UnixSocket.writeAll(fd, body)
+                close(fd)
+            }
         }
         return try spawn(o.argv, env: env, redactor: o.mask ? secrets : nil)
     }

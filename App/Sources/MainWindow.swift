@@ -430,6 +430,8 @@ struct OutcomeStyle {
             (label, detail, symbol, color) = ("Project rules trusted", after("trusted"), "checkmark.shield.fill", .green)
         case outcome.hasPrefix("rejected"):
             (label, detail, symbol, color) = ("Unknown program refused", after("rejected"), "exclamationmark.octagon.fill", .red)
+        case outcome.hasPrefix("exported"):
+            (label, detail, symbol, color) = ("Exported by you", "to a file", "square.and.arrow.up.fill", .blue)
         case outcome.hasPrefix("copied"):
             (label, detail, symbol, color) = ("Copied by you", nil, "doc.on.doc.fill", .blue)
         default:

@@ -156,6 +156,23 @@ final class Broker {
                 audit(shown, preApproved && !prod ? "released (allowed by .sx.toml)" : "released")
                 return BrokerResponse(ok: true, values: values)
 
+            case .reveal:
+                guard let name = req.name else { return .fail("name required") }
+                if let agent = req.agent {
+                    audit([name], "refused: export is human-only")
+                    return .fail("refused for \(agent): exporting a value to a file is human-only")
+                }
+                let card = ApprovalPanel.Request(title: "wants to write a key to a file", who: "Terminal", command: req.argv?.joined(separator: " "),
+                                                 project: req.cwd, secrets: [name], alwaysAsk: true,
+                                                 note: "The file will hold the real value. Delete it when you no longer need it.")
+                if let why = approve(card, reason: "Write \(name) to a file", key: nil) {
+                    audit([name], "denied: \(why)")
+                    return .fail("not approved: \(why)")
+                }
+                let value = try KeychainStore.get(name)
+                audit([name], "exported to a file")
+                return BrokerResponse(ok: true, values: [name: value.base64EncodedString()])
+
             case .trust:
                 guard let file = req.projectFile else { return .fail("projectFile required") }
                 guard let data = FileManager.default.contents(atPath: file),

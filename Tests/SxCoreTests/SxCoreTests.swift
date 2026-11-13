@@ -22,6 +22,13 @@ final class EnvFileTests: XCTestCase {
         XCTAssertNil(e[3].reference)
     }
 
+    func testQuotedRenderRoundTrips() {
+        let pairs = [("A", "plain"), ("B", "multi\nline \"quoted\" back\\slash"), ("C", "")]
+        let back = EnvFile.parse(EnvFile.renderQuoted(pairs))
+        XCTAssertEqual(back.map(\.key), ["A", "B", "C"])
+        XCTAssertEqual(back.map(\.value), pairs.map(\.1))
+    }
+
     func testSecretNames() {
         XCTAssertTrue(SecretName.isValid("reelifyads/OPENAI_KEY"))
         XCTAssertTrue(SecretName.isValid("ssh/id_ed25519.pub"))
