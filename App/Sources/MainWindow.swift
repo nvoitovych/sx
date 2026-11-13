@@ -98,6 +98,7 @@ struct SecretsView: View {
     @State private var selection: String?
     @State private var showAdd = false
     @State private var showImport = false
+    @State private var editingTags: SecretInfo?
     @State private var notice: String?
 
     private var filtered: [SecretInfo] {
@@ -112,6 +113,7 @@ struct SecretsView: View {
                 SecretsTable(secrets: filtered, lastUsed: audit.lastUsed, selection: $selection)
                 .contextMenu(forSelectionType: String.self) { ids in
                     if let name = ids.first {
+                        Button("Edit tags…") { editingTags = model.secrets.first { $0.name == name } }
                         Button("Copy reference  sx://\(name)") { copy("sx://\(name)") }
                         Button("Copy value (Touch ID, clears in 30 s)") { copyValue(name) }
                         Divider()
@@ -134,6 +136,9 @@ struct SecretsView: View {
         }
         .sheet(isPresented: $showAdd) { AddSecretSheet { model.reload() } }
         .sheet(isPresented: $showImport) { ImportEnvSheet { msg in notice = msg; model.reload() } }
+        .sheet(item: $editingTags) { secret in
+            TagEditorSheet(secret: secret) { msg in notice = msg; model.reload() }
+        }
         .onAppear {
             model.reload()
             audit.loadHistory()
@@ -233,6 +238,105 @@ struct TagBadge: View {
             .padding(.horizontal, 6).padding(.vertical, 2)
             .foregroundStyle(color)
             .background(color.opacity(0.16), in: Capsule())
+    }
+}
+
+/// Add or remove tags. Dropping `prod` weakens protection, so it needs Touch ID; everything else does not.
+struct TagEditorSheet: View {
+    let secret: SecretInfo
+    var onDone: (String) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var tags: [String] = []
+    @State private var newTag = ""
+    @State private var busy = false
+    @State private var error: String?
+
+    static let suggested = ["prod", "ssh", "legacy", "dev"]
+    static let hints = ["prod": "Touch ID every time", "ssh": "offered by the SSH agent", "legacy": "old, kept just in case", "dev": "development key"]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Tags").font(.headline)
+            SecretNameText(name: secret.name)
+
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(Self.suggested, id: \.self) { tag in
+                    Toggle(isOn: Binding(get: { tags.contains(tag) }, set: { on in toggle(tag, on) })) {
+                        HStack(spacing: 6) {
+                            TagBadge(tag: tag)
+                            Text(Self.hints[tag] ?? "").font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+
+            let custom = tags.filter { !Self.suggested.contains($0) }
+            if !custom.isEmpty {
+                HStack(spacing: 6) {
+                    ForEach(custom, id: \.self) { tag in
+                        Button { toggle(tag, false) } label: {
+                            HStack(spacing: 3) { TagBadge(tag: tag); Image(systemName: "xmark").font(.caption2) }
+                        }.buttonStyle(.plain)
+                    }
+                }
+            }
+            HStack {
+                TextField("New tag", text: $newTag).onSubmit(addCustom).frame(maxWidth: 200)
+                Button("Add", action: addCustom).disabled(!Self.isValid(newTag))
+            }
+            if let error { Text(error).font(.caption).foregroundStyle(.red) }
+
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("Save", action: save).keyboardShortcut(.defaultAction).disabled(busy)
+            }
+        }
+        .padding(20)
+        .frame(width: 380)
+        .onAppear { tags = secret.tags }
+    }
+
+    static func isValid(_ t: String) -> Bool {
+        let t = t.trimmingCharacters(in: .whitespaces).lowercased()
+        return !t.isEmpty && t.count <= 24 && t.allSatisfy { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" }
+    }
+
+    private func toggle(_ tag: String, _ on: Bool) {
+        if on { if !tags.contains(tag) { tags.append(tag) } } else { tags.removeAll { $0 == tag } }
+    }
+
+    private func addCustom() {
+        let t = newTag.trimmingCharacters(in: .whitespaces).lowercased()
+        guard Self.isValid(t) else { return }
+        toggle(t, true)
+        newTag = ""
+    }
+
+    private func save() {
+        let final = tags
+        let name = secret.name
+        let downgrade = secret.tags.contains("prod") && !final.contains("prod")
+        busy = true
+        DispatchQueue.global().async {
+            if downgrade {
+                let card = ApprovalPanel.Request(title: "Remove the prod tag?", who: "You", command: nil, project: nil,
+                                                 secrets: [name], alwaysAsk: true,
+                                                 note: "Without it, an approved command can reuse this key for hours.")
+                if let why = Approver.shared.authenticate(card, reason: "Remove prod from \(name)") {
+                    DispatchQueue.main.async { error = "Not changed: \(why)"; busy = false }
+                    return
+                }
+            }
+            do {
+                try KeychainStore.setTags(name, final)
+                AuditLog.shared.record(.init(time: Date(), op: "tags", client: "sx window", names: [name],
+                                             outcome: "tagged \(final.isEmpty ? "(none)" : final.joined(separator: ", "))"))
+                DispatchQueue.main.async { onDone("Tags of \(name): \(final.isEmpty ? "none" : final.joined(separator: ", "))"); dismiss() }
+            } catch {
+                DispatchQueue.main.async { self.error = "\(error)"; busy = false }
+            }
+        }
     }
 }
 
@@ -430,6 +534,10 @@ struct OutcomeStyle {
             (label, detail, symbol, color) = ("Project rules trusted", after("trusted"), "checkmark.shield.fill", .green)
         case outcome.hasPrefix("rejected"):
             (label, detail, symbol, color) = ("Unknown program refused", after("rejected"), "exclamationmark.octagon.fill", .red)
+        case outcome.hasPrefix("tagged"):
+            (label, detail, symbol, color) = ("Tags changed", after("tagged"), "tag.fill", .blue)
+        case outcome.hasPrefix("exported"):
+            (label, detail, symbol, color) = ("Exported by you", "to a file", "square.and.arrow.up.fill", .blue)
         case outcome.hasPrefix("copied"):
             (label, detail, symbol, color) = ("Copied by you", nil, "doc.on.doc.fill", .blue)
         default:
@@ -562,65 +670,113 @@ struct CommandLineView: View {
     @State private var status = CLIInstaller.status()
     @State private var message: String?
 
+    private static let groups: [(title: String, items: [(String, String)])] = [
+        ("Start", [
+            ("sx import-env .env --prefix myapp", "Move a .env into the keychain. Writes .env.sx with names only."),
+            ("sx run -- npm run dev", "Run with the keys from .env.sx. Values are masked in output."),
+            ("sx run --file .dev.vars -- wrangler dev", "For tools that read a file: it exists only while the command runs."),
+        ]),
+        ("Keys and files", [
+            ("sx put myapp/STRIPE_KEY --tag prod", "Add one key. Production keys ask for Touch ID every time."),
+            ("sx import-file AuthKey.p8 --name apple/asc", "Store any file: signing keys, certificates."),
+            ("sx export apple/asc --out AuthKey.p8", "Put a file back on disk. You only, with Touch ID."),
+            ("sx ls", "List names. Values are never printed."),
+        ]),
+        ("SSH", [
+            ("sx ssh import ~/.ssh/id_ed25519", "Keep the key in the keychain instead of a file."),
+            ("sx ssh setup --write", "Point ssh and git at the sx agent."),
+        ]),
+        ("Projects and vaults", [
+            ("sx trust", "Approve the commands this project's .sx.toml lets agents run."),
+            ("sx vaults", "Which vault (Keychain, Bitwarden, 1Password) this folder uses."),
+        ]),
+    ]
+
     var body: some View {
-        Form {
-            Section("The `sx` command") {
-                LabeledContent("Status") {
-                    Text(status.description).foregroundStyle(status.isInstalled ? Color.green : Color.orange)
-                }
-                HStack {
-                    Button(status.isInstalled ? "Reinstall in /usr/local/bin" : "Install in /usr/local/bin") {
-                        message = CLIInstaller.install()
-                        status = CLIInstaller.status()
+        ScrollView {
+            VStack(alignment: .leading, spacing: 22) {
+                statusCard
+                ForEach(Self.groups, id: \.title) { group in
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text(group.title).font(.headline)
+                        ForEach(group.items, id: \.0) { CommandRow(code: $0.0, note: $0.1) }
                     }
-                    Text("Creates a link to the copy inside sx.app, so updates of the app update the command.")
-                        .font(.caption).foregroundStyle(.secondary)
                 }
-                if let message { Text(message).font(.caption) }
+                agentsCard
             }
-            Section("Quick start") {
-                Snippet("sx import-env .env --prefix myapp --remove-original", "Move a .env into the keychain; writes .env.sx with references")
-                Snippet("sx run -- npm run dev", "Run with secrets from .env.sx; values are masked in output")
-                Snippet("sx put myapp/STRIPE_KEY --tag prod", "Add one secret (hidden prompt or stdin)")
-                Snippet("sx import-file ~/.ssh/id_ed25519 --name ssh/id_ed25519", "Store a key file")
-                Snippet("sx ls", "List names — values are never printed")
-                Snippet("sx ssh import ~/.ssh/id_ed25519 && sx ssh setup --write", "SSH keys from the keychain; ssh asks sx to sign")
-                Snippet("sx trust", "Approve this project's .sx.toml agent allowlist")
-                Snippet("sx vaults", "Keychain, Bitwarden, 1Password and plugin vaults (~/.config/sx/config.toml)")
-            }
-            Section("With AI agents") {
-                Text("When `sx` runs under Claude Code, Codex, Cursor and similar agents, it refuses commands that only print the environment (`env`, `printenv`, `sh -c`, `python -c` …), never disables masking, and every new command needs your approval in a card with Touch ID — unless a `.sx.toml` you trusted allows it.")
-                    .font(.callout)
-                Text("Limit: a program that legitimately receives a secret can still send it somewhere. Give agents development keys with narrow scopes; tag production secrets `prod`.")
-                    .font(.callout).foregroundStyle(.secondary)
-            }
+            .padding(20)
+            .frame(maxWidth: 720, alignment: .leading)
         }
-        .formStyle(.grouped)
         .navigationTitle("Command line")
         .onAppear { status = CLIInstaller.status() }
     }
-}
 
-struct Snippet: View {
-    let code: String
-    let note: String
-
-    init(_ code: String, _ note: String) {
-        self.code = code
-        self.note = note
+    private var statusCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .center, spacing: 12) {
+                Image(systemName: status.isInstalled ? "checkmark.circle.fill" : "terminal.fill")
+                    .font(.title2).foregroundStyle(status.isInstalled ? Color.green : Color.accentColor)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(status.isInstalled ? "The sx command is installed" : "Install the sx command").font(.headline)
+                    Text(status.detail).font(.callout).foregroundStyle(.secondary)
+                }
+                Spacer()
+                if status.isInstalled {
+                    Button("Reinstall") { install() }
+                } else {
+                    Button("Install") { install() }.buttonStyle(AccentButtonStyle())
+                }
+            }
+            if let message { Text(message).font(.caption).foregroundStyle(.secondary) }
+        }
+        .padding(14)
+        .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 12))
     }
 
+    private var agentsCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("With AI agents").font(.headline)
+            Label("Commands that only print keys — env, printenv, sh -c, python -c — are refused.", systemImage: "hand.raised.fill")
+            Label("Output masking can't be turned off.", systemImage: "eye.slash.fill")
+            Label("Each new command needs your Touch ID, unless a trusted .sx.toml allows it.", systemImage: "touchid")
+            Text("A program that gets a key can still leak it. Give agents development keys.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        .font(.callout)
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.purple.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private func install() {
+        message = CLIInstaller.install()
+        status = CLIInstaller.status()
+    }
+}
+
+/// A command in a code block with a copy button that confirms.
+struct CommandRow: View {
+    let code: String
+    let note: String
+    @State private var copied = false
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            HStack {
-                Text(code).font(.system(.body, design: .monospaced)).textSelection(.enabled)
-                Spacer()
-                Button {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Text(code).font(.system(.callout, design: .monospaced)).textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Button(copied ? "Copied" : "Copy") {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(code, forType: .string)
-                } label: { Image(systemName: "doc.on.doc") }.buttonStyle(.borderless)
+                    copied = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
+                }
+                .buttonStyle(.borderless).font(.caption.weight(.semibold))
+                .foregroundStyle(copied ? Color.green : Color.secondary)
             }
-            Text(note).font(.caption).foregroundStyle(.secondary)
+            .padding(.horizontal, 10).padding(.vertical, 8)
+            .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+            Text(note).font(.caption).foregroundStyle(.secondary).padding(.leading, 2)
         }
     }
 }

@@ -52,6 +52,13 @@ enum KeychainStore {
         guard status == errSecSuccess else { throw Failure("save \(name)", status) }
     }
 
+    /// Changes only the tags; the value is untouched.
+    static func setTags(_ name: String, _ tags: [String]) throws {
+        let attrs: [String: Any] = [kSecAttrGeneric as String: try JSONEncoder().encode(tags)]
+        let status = SecItemUpdate(query(name) as CFDictionary, attrs as CFDictionary)
+        guard status == errSecSuccess else { throw Failure("tag \(name)", status) }
+    }
+
     static func get(_ name: String) throws -> Data {
         var q = query(name)
         q[kSecReturnData as String] = true

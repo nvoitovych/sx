@@ -29,7 +29,7 @@ public enum EnvFile {
             if value.count >= 2, let first = value.first, first == "\"" || first == "'", value.last == first {
                 value = String(value.dropFirst().dropLast())
                 if first == "\"" {
-                    value = value.replacingOccurrences(of: "\\n", with: "\n").replacingOccurrences(of: "\\\"", with: "\"")
+                    value = unescape(value)
                 }
             } else if let hash = value.range(of: " #") {
                 value = value[..<hash.lowerBound].trimmingCharacters(in: .whitespaces)
@@ -44,6 +44,35 @@ public enum EnvFile {
         if let header { lines.append("# \(header)") }
         for e in entries { lines.append("\(e.key)=\(e.value)") }
         return lines.joined(separator: "\n") + "\n"
+    }
+
+    /// Double-quoted dotenv escapes: \\n, \\", \\\\ (anything else is kept as written).
+    static func unescape(_ s: String) -> String {
+        var out = ""
+        var it = s.makeIterator()
+        while let c = it.next() {
+            guard c == "\\", let n = it.next() else {
+                out.append(c)
+                continue
+            }
+            switch n {
+            case "n": out.append("\n")
+            case "\"": out.append("\"")
+            case "\\": out.append("\\")
+            default: out.append(c); out.append(n)
+            }
+        }
+        return out
+    }
+
+    /// Dotenv with every value double-quoted and escaped, so newlines and quotes survive a round trip.
+    public static func renderQuoted(_ pairs: [(String, String)]) -> String {
+        pairs.map { key, value in
+            let escaped = value.replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "\"", with: "\\\"")
+                .replacingOccurrences(of: "\n", with: "\\n")
+            return "\(key)=\"\(escaped)\""
+        }.joined(separator: "\n") + "\n"
     }
 
     public static func isValidKey(_ key: String) -> Bool {

@@ -6,6 +6,8 @@ public struct BrokerRequest: Codable, Equatable {
         case ping, list, put, resolve, hash, remove
         /// Human approves a project's `.sx.toml` (Touch ID); stores its digest.
         case trust
+        /// Human-only: return one value so the CLI can write it to a file (restoring key files on a new Mac).
+        case reveal
     }
 
     public var op: Op

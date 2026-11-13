@@ -12,6 +12,16 @@ enum CLIInstaller {
 
         var isInstalled: Bool { if case .installed = self { return true } else { return false } }
 
+        /// One plain line for the UI; paths shown with ~.
+        var detail: String {
+            switch self {
+            case let .installed(p): return "Linked at \(CLIInstaller.tilde(p)). Updates come with the app."
+            case let .other(p): return "Another sx is at \(CLIInstaller.tilde(p)). Install links /usr/local/bin/sx to this app."
+            case .missing: return "Links /usr/local/bin/sx to the copy inside the app. Asks for your password once."
+            case .notBundled: return "This build has no bundled command."
+            }
+        }
+
         var description: String {
             switch self {
             case let .installed(p): return "Installed at \(p)"
@@ -22,12 +32,18 @@ enum CLIInstaller {
         }
     }
 
+    static func tilde(_ path: String) -> String {
+        path.hasPrefix(SX.realHome) ? "~" + path.dropFirst(SX.realHome.count) : path
+    }
+
     static func status() -> Status {
+        if Snapshot.isActive { return .installed(SX.realHome + "/.local/bin/sx") }
         guard FileManager.default.isExecutableFile(atPath: bundled) else { return .notBundled }
         for path in [linkPath, SX.realHome + "/.local/bin/sx", "/opt/homebrew/bin/sx"] {
             guard FileManager.default.fileExists(atPath: path) else { continue }
             let resolved = (try? FileManager.default.destinationOfSymbolicLink(atPath: path)) ?? path
-            return resolved == bundled ? .installed(path) : .other(path)
+            // A link into any Sx.app counts: it follows that app's updates.
+            return resolved == bundled || resolved.hasSuffix("/Sx.app/Contents/Helpers/sx") ? .installed(path) : .other(path)
         }
         return .missing
     }

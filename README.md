@@ -37,12 +37,15 @@ Requirements: macOS 14+, Apple silicon or Intel. iCloud Keychain on if you want 
 ```sh
 sx put myapp/STRIPE_KEY --tag prod              # hidden prompt, or pipe the value on stdin
 sx import-env .env --prefix myapp               # moves values in, writes .env.sx next to it
+sx import-env .dev.vars --prefix myapp --literal LOG_LEVEL,FEATURE_X   # keep non-secrets as plain text
 sx import-file ./AuthKey.p8 --name apple/asc    # any file
 sx ls                                           # names only; values are never printed
 sx verify myapp/STRIPE_KEY --file old.txt       # compares hashes
 sx run -- npm test                              # reads .env.sx in the current directory
 sx run --env-file deploy.env.sx -- make deploy
 sx run --env API=sx://myapp/OPENAI_KEY -- ./script.sh
+sx run --file .dev.vars -- wrangler dev         # tools that only read a file: it exists for the run only
+sx export apple/asc --out ~/.appstoreconnect/AuthKey.p8   # put a key file back (human-only, Touch ID)
 ```
 
 `.env.sx` is ordinary dotenv. `KEY=sx://name` is resolved, everything else passes through:
