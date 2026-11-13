@@ -5,7 +5,7 @@ VERSION  := $(shell sed -n 's/.*version = "\(.*\)"/\1/p' Sources/SxCore/Constant
 DMG      := $(BUILD)/sx-$(VERSION).dmg
 APP      := $(BUILD)/export/Sx.app
 
-.PHONY: test icons cli app dmg dmg-only release publish install uninstall clean
+.PHONY: test icons cli app dmg dmg-only notarize-dmg release publish install uninstall clean
 
 test:
 	swift test
@@ -55,7 +55,15 @@ release: cli
 	  -exportOptionsPlist App/ExportOptions-notarize.plist -exportPath $(BUILD)/notarized -allowProvisioningUpdates
 	scripts/wait-notarized.sh $(BUILD)/Sx.xcarchive $(BUILD)/export
 	xcrun stapler validate $(APP)
-	$(MAKE) dmg-only
+	$(MAKE) dmg-only notarize-dmg
+
+# The DMG is notarized separately: Gatekeeper checks the downloaded image before the app inside.
+# Needs a notarytool profile: xcrun notarytool store-credentials $(NOTARY_PROFILE) --key … --key-id … --issuer …
+NOTARY_PROFILE ?= nvlab-release
+notarize-dmg:
+	xcrun notarytool submit $(DMG) --keychain-profile $(NOTARY_PROFILE) --wait
+	xcrun stapler staple $(DMG)
+	spctl -a -t open --context context:primary-signature -v $(DMG)
 
 # Public download: R2 bucket nvlab-static → static.nvlab.co/sx/ (nvlab.co/downloads/sx/ redirects there).
 # Refuses un-notarized builds: Gatekeeper would block them for every user.

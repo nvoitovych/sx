@@ -139,7 +139,7 @@ Requirements: Xcode 16+, [XcodeGen](https://github.com/yonaskolb/XcodeGen), an A
 make test       # unit tests (SwiftPM)
 make install    # builds CLI + app, installs to /Applications, links ~/.local/bin/sx
 make dmg        # signed installer
-make release    # notarized via the Xcode account, then DMG
+make release    # app notarized via the Xcode account; DMG via a notarytool profile (NOTARY_PROFILE)
 ```
 
 Official builds are signed by team `37A7P47GPA`. For your own build, replace the team ID in `Sources/SxCore/Constants.swift` (`teamID`) and `App/project.yml` (`DEVELOPMENT_TEAM`, `application-groups`) and change the bundle IDs. Builds from different teams cannot read each other's secrets — that is the point.
