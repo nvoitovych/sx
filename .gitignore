@@ -16,3 +16,4 @@ design/out/
 *.key
 .DS_Store
 design/shots/
+.wrangler/
