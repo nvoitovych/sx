@@ -564,65 +564,113 @@ struct CommandLineView: View {
     @State private var status = CLIInstaller.status()
     @State private var message: String?
 
+    private static let groups: [(title: String, items: [(String, String)])] = [
+        ("Start", [
+            ("sx import-env .env --prefix myapp", "Move a .env into the keychain. Writes .env.sx with names only."),
+            ("sx run -- npm run dev", "Run with the keys from .env.sx. Values are masked in output."),
+            ("sx run --file .dev.vars -- wrangler dev", "For tools that read a file: it exists only while the command runs."),
+        ]),
+        ("Keys and files", [
+            ("sx put myapp/STRIPE_KEY --tag prod", "Add one key. Production keys ask for Touch ID every time."),
+            ("sx import-file AuthKey.p8 --name apple/asc", "Store any file: signing keys, certificates."),
+            ("sx export apple/asc --out AuthKey.p8", "Put a file back on disk. You only, with Touch ID."),
+            ("sx ls", "List names. Values are never printed."),
+        ]),
+        ("SSH", [
+            ("sx ssh import ~/.ssh/id_ed25519", "Keep the key in the keychain instead of a file."),
+            ("sx ssh setup --write", "Point ssh and git at the sx agent."),
+        ]),
+        ("Projects and vaults", [
+            ("sx trust", "Approve the commands this project's .sx.toml lets agents run."),
+            ("sx vaults", "Which vault (Keychain, Bitwarden, 1Password) this folder uses."),
+        ]),
+    ]
+
     var body: some View {
-        Form {
-            Section("The `sx` command") {
-                LabeledContent("Status") {
-                    Text(status.description).foregroundStyle(status.isInstalled ? Color.green : Color.orange)
-                }
-                HStack {
-                    Button(status.isInstalled ? "Reinstall in /usr/local/bin" : "Install in /usr/local/bin") {
-                        message = CLIInstaller.install()
-                        status = CLIInstaller.status()
+        ScrollView {
+            VStack(alignment: .leading, spacing: 22) {
+                statusCard
+                ForEach(Self.groups, id: \.title) { group in
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text(group.title).font(.headline)
+                        ForEach(group.items, id: \.0) { CommandRow(code: $0.0, note: $0.1) }
                     }
-                    Text("Creates a link to the copy inside sx.app, so updates of the app update the command.")
-                        .font(.caption).foregroundStyle(.secondary)
                 }
-                if let message { Text(message).font(.caption) }
+                agentsCard
             }
-            Section("Quick start") {
-                Snippet("sx import-env .env --prefix myapp --remove-original", "Move a .env into the keychain; writes .env.sx with references")
-                Snippet("sx run -- npm run dev", "Run with secrets from .env.sx; values are masked in output")
-                Snippet("sx put myapp/STRIPE_KEY --tag prod", "Add one secret (hidden prompt or stdin)")
-                Snippet("sx import-file ~/.ssh/id_ed25519 --name ssh/id_ed25519", "Store a key file")
-                Snippet("sx ls", "List names — values are never printed")
-                Snippet("sx ssh import ~/.ssh/id_ed25519 && sx ssh setup --write", "SSH keys from the keychain; ssh asks sx to sign")
-                Snippet("sx trust", "Approve this project's .sx.toml agent allowlist")
-                Snippet("sx vaults", "Keychain, Bitwarden, 1Password and plugin vaults (~/.config/sx/config.toml)")
-            }
-            Section("With AI agents") {
-                Text("When `sx` runs under Claude Code, Codex, Cursor and similar agents, it refuses commands that only print the environment (`env`, `printenv`, `sh -c`, `python -c` …), never disables masking, and every new command needs your approval in a card with Touch ID — unless a `.sx.toml` you trusted allows it.")
-                    .font(.callout)
-                Text("Limit: a program that legitimately receives a secret can still send it somewhere. Give agents development keys with narrow scopes; tag production secrets `prod`.")
-                    .font(.callout).foregroundStyle(.secondary)
-            }
+            .padding(20)
+            .frame(maxWidth: 720, alignment: .leading)
         }
-        .formStyle(.grouped)
         .navigationTitle("Command line")
         .onAppear { status = CLIInstaller.status() }
     }
-}
 
-struct Snippet: View {
-    let code: String
-    let note: String
-
-    init(_ code: String, _ note: String) {
-        self.code = code
-        self.note = note
+    private var statusCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .center, spacing: 12) {
+                Image(systemName: status.isInstalled ? "checkmark.circle.fill" : "terminal.fill")
+                    .font(.title2).foregroundStyle(status.isInstalled ? Color.green : Color.accentColor)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(status.isInstalled ? "The sx command is installed" : "Install the sx command").font(.headline)
+                    Text(status.detail).font(.callout).foregroundStyle(.secondary)
+                }
+                Spacer()
+                if status.isInstalled {
+                    Button("Reinstall") { install() }
+                } else {
+                    Button("Install") { install() }.buttonStyle(AccentButtonStyle())
+                }
+            }
+            if let message { Text(message).font(.caption).foregroundStyle(.secondary) }
+        }
+        .padding(14)
+        .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 12))
     }
 
+    private var agentsCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("With AI agents").font(.headline)
+            Label("Commands that only print keys — env, printenv, sh -c, python -c — are refused.", systemImage: "hand.raised.fill")
+            Label("Output masking can't be turned off.", systemImage: "eye.slash.fill")
+            Label("Each new command needs your Touch ID, unless a trusted .sx.toml allows it.", systemImage: "touchid")
+            Text("A program that gets a key can still leak it. Give agents development keys.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        .font(.callout)
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.purple.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private func install() {
+        message = CLIInstaller.install()
+        status = CLIInstaller.status()
+    }
+}
+
+/// A command in a code block with a copy button that confirms.
+struct CommandRow: View {
+    let code: String
+    let note: String
+    @State private var copied = false
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            HStack {
-                Text(code).font(.system(.body, design: .monospaced)).textSelection(.enabled)
-                Spacer()
-                Button {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Text(code).font(.system(.callout, design: .monospaced)).textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Button(copied ? "Copied" : "Copy") {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(code, forType: .string)
-                } label: { Image(systemName: "doc.on.doc") }.buttonStyle(.borderless)
+                    copied = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
+                }
+                .buttonStyle(.borderless).font(.caption.weight(.semibold))
+                .foregroundStyle(copied ? Color.green : Color.secondary)
             }
-            Text(note).font(.caption).foregroundStyle(.secondary)
+            .padding(.horizontal, 10).padding(.vertical, 8)
+            .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+            Text(note).font(.caption).foregroundStyle(.secondary).padding(.leading, 2)
         }
     }
 }

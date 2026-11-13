@@ -57,6 +57,8 @@ enum Snapshot {
             // from the app's real views on solid backgrounds.
             render(Framed { ShotWindow(selected: .secrets) { ShotSecrets() } }, size: nil, titled: false, to: "\(dir)/secrets-\(suffix).png")
             render(Framed { ShotWindow(selected: .activity) { ShotActivity() } }, size: nil, titled: false, to: "\(dir)/activity-\(suffix).png")
+            render(Framed { ShotWindow(selected: .cli) { CommandLineView() } }, size: nil, titled: false, to: "\(dir)/cli-\(suffix).png")
+            render(Framed { ShotWindow(selected: .settings) { SettingsView() } }, size: nil, titled: false, to: "\(dir)/settings-\(suffix).png")
             let card = ApprovalPanel.Request(title: "wants to use 2 keys", who: "Claude Code", isAgent: true, command: "npm run deploy",
                                              project: "~/code/myapp", secrets: ["myapp/STRIPE_KEY", "cloudflare/API_TOKEN"], alwaysAsk: false,
                                              expires: Date().addingTimeInterval(118),
