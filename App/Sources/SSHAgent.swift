@@ -102,7 +102,7 @@ final class SSHAgent {
             let prod = KeychainStore.tags(k.name).contains("prod")
             let card = ApprovalPanel.Request(title: "wants to sign in with an SSH key", who: who, isAgent: agent != nil,
                                              command: ancestry.joined(separator: " ← "),
-                                             project: nil, secrets: [k.name], alwaysAsk: prod)
+                                             project: nil, secrets: [k.name], alwaysAsk: prod, isProduction: prod)
             let key = prod ? nil : Approver.shared.key(cwd: "ssh", argv: [agent ?? "human"], names: [k.name])
             if let why = Broker.shared.approve(card, reason: "\(who) wants to sign with \(k.name)", key: key, clientFD: fd) {
                 AuditLog.shared.record(.init(time: Date(), op: "ssh-sign", client: ancestry.first ?? "?", agent: agent,

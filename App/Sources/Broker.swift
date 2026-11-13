@@ -84,7 +84,7 @@ final class Broker {
                 if KeychainStore.exists(name) {
                     let who = req.agent ?? "Terminal"
                     let card = ApprovalPanel.Request(title: "wants to overwrite a key", who: who, isAgent: req.agent != nil, command: nil,
-                                                     project: req.cwd, secrets: [name], alwaysAsk: true)
+                                                     project: nil, secrets: [name], alwaysAsk: true)
                     if let why = approve(card, reason: "\(who) wants to OVERWRITE secret \(name)", key: nil) {
                         audit([name], "denied overwrite: \(why)")
                         return .fail("overwrite of \(name) was not approved: \(why)")
@@ -99,7 +99,7 @@ final class Broker {
                 guard let name = req.name else { return .fail("name required") }
                 let who = req.agent ?? "Terminal"
                 let card = ApprovalPanel.Request(title: "wants to delete a key", who: who, isAgent: req.agent != nil, command: nil,
-                                                 project: req.cwd, secrets: [name], alwaysAsk: true)
+                                                 project: nil, secrets: [name], alwaysAsk: true)
                 if let why = approve(card, reason: "Delete secret \(name)", key: nil) {
                     audit([name], "denied delete: \(why)")
                     return .fail("delete was not approved: \(why)")
@@ -144,7 +144,7 @@ final class Broker {
                     let key = prod ? nil : Approver.shared.key(cwd: req.cwd ?? "", argv: argv, names: names + external)
                     let card = ApprovalPanel.Request(title: "wants to use \(shown.count) \(shown.count == 1 ? "key" : "keys")", who: who, isAgent: req.agent != nil,
                                                      command: argv.joined(separator: " "),
-                                                     project: req.cwd, secrets: shown, alwaysAsk: prod,
+                                                     project: req.cwd, secrets: shown, alwaysAsk: prod, isProduction: prod,
                                                      note: "Keys go to this command only. Its output is masked.")
                     if let why = approve(card, reason: reason, key: key) {
                         audit(shown, "denied: \(why)")

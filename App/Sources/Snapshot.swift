@@ -59,6 +59,10 @@ enum Snapshot {
             render(Framed { ShotWindow(selected: .activity) { ShotActivity() } }, size: nil, titled: false, to: "\(dir)/activity-\(suffix).png")
             render(Framed { ShotWindow(selected: .cli) { CommandLineView() } }, size: nil, titled: false, to: "\(dir)/cli-\(suffix).png")
             render(Framed { ShotWindow(selected: .settings) { SettingsView() } }, size: nil, titled: false, to: "\(dir)/settings-\(suffix).png")
+            let del = ApprovalPanel.Request(title: "wants to delete a key", who: "Terminal", command: nil, project: nil,
+                                            secrets: ["ssh/e2e-test"], alwaysAsk: true, expires: Date().addingTimeInterval(116))
+            render(Framed { ApprovalPanel.preview(del).clipShape(RoundedRectangle(cornerRadius: 14)) }, size: nil, titled: false,
+                   to: "\(dir)/delete-\(suffix).png")
             render(Framed { TagEditorSheet(secret: demoSecrets[1], onDone: { _ in })
                 .background(Color(nsColor: .windowBackgroundColor)).clipShape(RoundedRectangle(cornerRadius: 12)) },
                    size: nil, titled: false, to: "\(dir)/tags-\(suffix).png")
