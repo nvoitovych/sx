@@ -15,7 +15,10 @@ final class ApprovalPanel {
         var command: String?
         var project: String?
         var secrets: [String]
+        /// No "remember" option: asked every single time (deletes, exports, prod keys…).
         var alwaysAsk: Bool
+        /// Shown as a warning only when the key itself is tagged prod.
+        var isProduction = false
         /// Shown as a countdown; the broker gives up (denies) at this time.
         var expires: Date?
         /// One plain sentence of context, e.g. where the keys go.
@@ -69,7 +72,8 @@ final class ApprovalPanel {
             if current === panel { current = nil; currentAuth = nil }
             onOutcome(outcome)
         }
-        panel.contentView = NSHostingView(rootView: ApprovalView(request: request, auth: auth))
+        // The hidden title bar would otherwise push the content down by its height.
+        panel.contentView = NSHostingView(rootView: ApprovalView(request: request, auth: auth).ignoresSafeArea())
         currentAuth = auth
         panel.setContentSize(panel.contentView!.fittingSize)
         let f = activeScreen().visibleFrame
@@ -158,8 +162,16 @@ final class CardAuth: ObservableObject {
 private struct TouchIDView: NSViewRepresentable {
     let context: LAContext
 
+    /// `.small` draws at 32×32 (`.regular` is 64 and spills out of a smaller frame).
     func makeNSView(context ctx: Context) -> LAAuthenticationView {
-        LAAuthenticationView(context: self.context, controlSize: .regular)
+        let view = LAAuthenticationView(context: self.context, controlSize: .small)
+        view.wantsLayer = true
+        view.layer?.masksToBounds = true
+        return view
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: LAAuthenticationView, context: Context) -> CGSize? {
+        CGSize(width: 32, height: 32)
     }
 
     func updateNSView(_ view: LAAuthenticationView, context ctx: Context) {}
@@ -194,7 +206,7 @@ private struct ApprovalView: View {
                 if let project = request.project { field("In", abbreviate(project)) }
                 if !request.secrets.isEmpty {
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        label("Keys")
+                        label(request.secrets.count == 1 ? "Key" : "Keys")
                         FlowChips(items: request.secrets)
                     }
                 }
@@ -215,7 +227,7 @@ private struct ApprovalView: View {
             }
 
             HStack(spacing: 6) {
-                if request.alwaysAsk {
+                if request.isProduction {
                     Label("Production key — asks every time", systemImage: "exclamationmark.shield.fill").foregroundStyle(.orange)
                 } else if let hint = auth.hint {
                     Text(hint)
@@ -229,19 +241,25 @@ private struct ApprovalView: View {
             .font(.caption).foregroundStyle(.secondary)
 
             // Esc denies; Return does nothing, so a stray keypress never approves.
-            HStack(spacing: 12) {
+            HStack(alignment: .center, spacing: 12) {
                 Button("Deny", role: .cancel) { auth.finish(.denied) }
                     .keyboardShortcut(.cancelAction)
                     .controlSize(.large)
                 Spacer()
                 if auth.biometricsReady {
-                    if auth.interactive {
-                        TouchIDView(context: auth.context).frame(width: 28, height: 28)
-                    } else {
-                        Image(systemName: "touchid").font(.title2).foregroundStyle(Color.accentColor)
+                    HStack(spacing: 10) {
+                        if auth.interactive {
+                            TouchIDView(context: auth.context).frame(width: 32, height: 32)
+                        } else {
+                            Image(systemName: "touchid").font(.system(size: 26)).foregroundStyle(Color.accentColor)
+                                .frame(width: 32, height: 32)
+                        }
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("Touch ID to allow").font(.callout.weight(.semibold))
+                            Button("or use password") { auth.usePassword() }
+                                .buttonStyle(.link).font(.caption)
+                        }
                     }
-                    Text("Touch ID to allow").font(.callout.weight(.semibold))
-                    Button("Use password…") { auth.usePassword() }.buttonStyle(.link).font(.caption)
                 } else {
                     Button { auth.usePassword() } label: { Label("Allow", systemImage: "lock.open.fill") }
                         .buttonStyle(AccentButtonStyle())
