@@ -5,13 +5,27 @@ import SxCore
 protocol ExternalBackend {
     func get(_ name: String, session: String?) throws -> Data
     func list(session: String?) throws -> [String]
+    /// Stores a new secret; refuses to replace one that exists.
+    func put(_ name: String, value: Data, about: String?, collection: String?, session: String?) throws
+    /// Where `put` can file a secret (Bitwarden: the organization's collections).
+    func collections(session: String?) throws -> [String]
+}
+
+extension ExternalBackend {
+    func put(_ name: String, value: Data, about: String?, collection: String?, session: String?) throws {
+        throw CLIError("this vault is read-only for sx; store \(name) with its own tool")
+    }
+
+    func collections(session: String?) throws -> [String] { [] }
 }
 
 enum Backends {
     static func make(_ vault: VaultConfig) throws -> ExternalBackend {
         switch vault.backend {
         case .keychain: throw CLIError("keychain vaults go through Sx.app")
-        case let .bitwarden(server): return Bitwarden(vault: vault.name, server: server, cli: vault.bitwardenCLI)
+        case let .bitwarden(server):
+            return Bitwarden(vault: vault.name, server: server, cli: vault.bitwardenCLI,
+                             organization: vault.settings["organization"], collection: vault.settings["collection"])
         case let .onePassword(account): return OnePassword(account: account)
         case let .plugin(command): return Plugin(command: command, vault: vault)
         }
@@ -60,12 +74,15 @@ struct Bitwarden: ExternalBackend {
     /// argv of the Bitwarden CLI (`VaultConfig.bitwardenCLI`): `bw`, or a pinned one such as
     /// `npx -y @bitwarden/cli@<version>`.
     let cli: [String]
+    /// Organization (name or id) that `put` files items in, and its default collection.
+    var organization: String? = nil
+    var collection: String? = nil
 
     /// Runs the vault's CLI. A CLI newer than a self-hosted server can fail to read the server's
     /// key-derivation answer; that failure names the fix instead of only the CLI's own words.
-    private func bw(_ args: [String], env: [String: String]) throws -> Data {
+    private func bw(_ args: [String], env: [String: String], stdin: Data? = nil) throws -> Data {
         do {
-            return try runTool(cli[0], Array(cli.dropFirst()) + args, env: env)
+            return try runTool(cli[0], Array(cli.dropFirst()) + args, env: env, stdin: stdin)
         } catch let error as CLIError where error.description.contains("KDF") {
             throw CLIError("\(error.description)\n  the Bitwarden CLI does not understand this server's login settings; "
                 + "pin a CLI that matches the server in [vault.\(vault)]: cli = \"npx -y @bitwarden/cli@<version>\"")
@@ -105,6 +122,50 @@ struct Bitwarden: ExternalBackend {
         let json = try bw(["list", "items", "--nointeraction"], env: env(session: session))
         let items = try JSONSerialization.jsonObject(with: json) as? [[String: Any]] ?? []
         return items.compactMap { $0["name"] as? String }.sorted()
+    }
+
+    /// The item travels to `bw create` on stdin, never in argv (argv is visible to every process).
+    /// An existing item of that name is refused; the stored value is read back and compared by hash.
+    func put(_ name: String, value: Data, about: String?, collection wanted: String?, session: String?) throws {
+        guard !name.isEmpty, !name.contains("\n") else { throw CLIError("invalid name \(name)") }
+        guard let text = String(data: value, encoding: .utf8), !text.isEmpty else {
+            throw CLIError("\(name): Bitwarden stores text; the value is empty or not UTF-8")
+        }
+        let e = env(session: session)
+        // The CLI answers from its local copy; a fresh one sees items, organizations and memberships added since login.
+        _ = try bw(["sync", "--nointeraction"], env: e)
+        let found = try JSONSerialization.jsonObject(with: bw(["list", "items", "--search", name, "--nointeraction"], env: e))
+        if (found as? [[String: Any]] ?? []).contains(where: { $0["name"] as? String == name }) {
+            throw CLIError("\(name) already exists in \(vault); sx does not overwrite — rename or remove it in Bitwarden first")
+        }
+        var orgId: String?
+        var collId: String?
+        if let organization {
+            let orgs = try JSONSerialization.jsonObject(with: bw(["list", "organizations", "--nointeraction"], env: e))
+            orgId = try BitwardenItem.pick(organization, from: orgs as? [[String: Any]] ?? [], kind: "organization")
+            guard let c = wanted ?? collection else {
+                throw CLIError("\(vault) files secrets in organization \(organization); name a collection "
+                    + "(--collection, or collection = \"…\" in [vault.\(vault)]); see sx ls --vault \(vault) --collections")
+            }
+            let colls = try JSONSerialization.jsonObject(with: bw(["list", "org-collections", "--organizationid", orgId!, "--nointeraction"], env: e))
+            collId = try BitwardenItem.pick(c, from: colls as? [[String: Any]] ?? [], kind: "collection")
+        }
+        let item = BitwardenItem.make(name: name, value: text, about: about, organizationId: orgId, collectionId: collId)
+        let encoded = try JSONSerialization.data(withJSONObject: item).base64EncodedData()
+        _ = try bw(["create", "item", "--nointeraction"], env: e, stdin: encoded)
+        guard shortHash(try get(name, session: session)) == shortHash(value) else {
+            throw CLIError("\(name) was created but reads back different; check it in Bitwarden")
+        }
+    }
+
+    func collections(session: String?) throws -> [String] {
+        guard let organization else { return [] }
+        let e = env(session: session)
+        _ = try bw(["sync", "--nointeraction"], env: e)
+        let orgs = try JSONSerialization.jsonObject(with: bw(["list", "organizations", "--nointeraction"], env: e))
+        let orgId = try BitwardenItem.pick(organization, from: orgs as? [[String: Any]] ?? [], kind: "organization")
+        let colls = try JSONSerialization.jsonObject(with: bw(["list", "org-collections", "--organizationid", orgId, "--nointeraction"], env: e))
+        return (colls as? [[String: Any]] ?? []).compactMap { $0["name"] as? String }.sorted()
     }
 
     /// Interactive: configure server, log in if needed, unlock; returns the session key.

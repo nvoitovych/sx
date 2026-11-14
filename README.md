@@ -67,6 +67,8 @@ default = "personal"            # the built-in iCloud Keychain vault
 backend = "bitwarden"
 server  = "https://vault.example.com"   # optional; omit for bitwarden.com
 cli     = "npx -y @bitwarden/cli@2025.12.1"  # optional; default `bw`
+organization = "Acme"                  # optional; `sx put --vault work` files items here
+collection   = "Engineering"           # optional default collection for `sx put`
 
 [vault.client]
 backend = "1password"
@@ -83,6 +85,7 @@ type    = "hashicorp"                   # runs `sx-backend-hashicorp`
 
 - **Bitwarden**: `sx login work` unlocks once (`bw` CLI) and keeps the session in the keychain; `sx run` asks before using it. Names are item names; `item#field` reads a custom field.
   A self-hosted server (e.g. Vaultwarden) can lag the newest `bw`: if login fails with `KDF config response does not contain a valid KDF type`, pin a CLI version that matches the server with `cli` for that vault only.
+  `sx put NAME --vault work [--file P] [--about TEXT] [--collection C]` stores a new item: a multi-line value (a key, a certificate) becomes a secure note holding only the value, one line becomes a login password; `--about` goes into a text field `about`. With `organization` set the item lands in that organization's collection (`sx ls --vault work --collections` lists them). sx never overwrites an existing item, sends the item to `bw` on stdin (not in argv) and reads it back to compare by hash.
 - **1Password**: names are `Vault/Item` or `Vault/Item/field`; `op` handles its own unlock.
 - **Your own backend**: any executable, see [docs/plugins.md](docs/plugins.md).
 

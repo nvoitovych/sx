@@ -86,6 +86,31 @@ final class VaultConfigTests: XCTestCase {
         XCTAssertFalse(VaultConfig.bitwardenNeedsSecondFactor("bw failed: KDF config response does not contain a valid KDF type"))
     }
 
+    func testBitwardenItemKeepsTheValueAloneAndTheDescriptionAside() {
+        let pem = "-----BEGIN KEY-----\nabc\n-----END KEY-----\n"
+        let note = BitwardenItem.make(name: "App key", value: pem, about: "App ID 42", organizationId: "o1", collectionId: "c1")
+        XCTAssertEqual(note["type"] as? Int, 2)
+        XCTAssertEqual(note["notes"] as? String, pem)
+        XCTAssertEqual((note["fields"] as? [[String: Any]])?.first?["name"] as? String, "about")
+        XCTAssertEqual((note["fields"] as? [[String: Any]])?.first?["value"] as? String, "App ID 42")
+        XCTAssertEqual(note["organizationId"] as? String, "o1")
+        XCTAssertEqual(note["collectionIds"] as? [String], ["c1"])
+        let login = BitwardenItem.make(name: "token", value: "s3cret", about: nil, organizationId: nil, collectionId: nil)
+        XCTAssertEqual(login["type"] as? Int, 1)
+        XCTAssertEqual((login["login"] as? [String: Any])?["password"] as? String, "s3cret")
+        XCTAssertNil(login["notes"])
+        XCTAssertNil(login["fields"])
+        XCTAssertNil(login["organizationId"])
+    }
+
+    func testBitwardenPickTakesOneByNameOrIdAndRefusesTheRest() throws {
+        let entries: [[String: Any]] = [["id": "c1", "name": "Ops"], ["id": "c2", "name": "Dev"], ["id": "c3", "name": "Dev"]]
+        XCTAssertEqual(try BitwardenItem.pick("Ops", from: entries, kind: "collection"), "c1")
+        XCTAssertEqual(try BitwardenItem.pick("c3", from: entries, kind: "collection"), "c3")
+        XCTAssertThrowsError(try BitwardenItem.pick("Dev", from: entries, kind: "collection"))
+        XCTAssertThrowsError(try BitwardenItem.pick("Nope", from: entries, kind: "collection"))
+    }
+
     func testUnknownRouteTargetFails() {
         XCTAssertThrowsError(try SxConfig.parse("[route]\n\"/a/**\" = \"nope\""))
     }
