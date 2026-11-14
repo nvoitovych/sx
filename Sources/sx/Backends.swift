@@ -22,21 +22,18 @@ enum Backends {
 }
 
 /// Runs a helper; stdout is captured (never printed), stderr is summarized on failure.
-func runTool(_ path: String, _ args: [String], env extra: [String: String] = [:], stdin: Data? = nil,
-             interactive: Bool = false) throws -> Data {
+/// No helper gets the terminal: a child process does not own it, so prompts belong to sx.
+func runTool(_ path: String, _ args: [String], env extra: [String: String] = [:], stdin: Data? = nil) throws -> Data {
     let p = Process()
     p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
     p.arguments = [path] + args
     var env = ProcessInfo.processInfo.environment
     for (k, v) in extra { env[k] = v }
     p.environment = env
-    // Interactive tools own the terminal; nothing is captured.
     let out = Pipe()
     let err = Pipe()
-    if !interactive {
-        p.standardOutput = out
-        p.standardError = err
-    }
+    p.standardOutput = out
+    p.standardError = err
     if let stdin {
         let inPipe = Pipe()
         p.standardInput = inPipe
@@ -44,13 +41,13 @@ func runTool(_ path: String, _ args: [String], env extra: [String: String] = [:]
         inPipe.fileHandleForWriting.write(stdin)
         try inPipe.fileHandleForWriting.close()
     } else {
-        if !interactive { p.standardInput = FileHandle.nullDevice }
+        p.standardInput = FileHandle.nullDevice
         do { try p.run() } catch { throw CLIError("\(path) not found — install it first") }
     }
-    let data = interactive ? Data() : out.fileHandleForReading.readDataToEndOfFile()
+    let data = out.fileHandleForReading.readDataToEndOfFile()
     p.waitUntilExit()
     guard p.terminationStatus == 0 else {
-        let msg = interactive ? "" : String(decoding: err.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        let msg = String(decoding: err.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
             .trimmingCharacters(in: .whitespacesAndNewlines).components(separatedBy: .newlines).last ?? ""
         throw CLIError("\(path) failed\(msg.isEmpty ? "" : ": \(msg)")")
     }
@@ -66,9 +63,9 @@ struct Bitwarden: ExternalBackend {
 
     /// Runs the vault's CLI. A CLI newer than a self-hosted server can fail to read the server's
     /// key-derivation answer; that failure names the fix instead of only the CLI's own words.
-    private func bw(_ args: [String], env: [String: String], interactive: Bool = false) throws -> Data {
+    private func bw(_ args: [String], env: [String: String]) throws -> Data {
         do {
-            return try runTool(cli[0], Array(cli.dropFirst()) + args, env: env, interactive: interactive)
+            return try runTool(cli[0], Array(cli.dropFirst()) + args, env: env)
         } catch let error as CLIError where error.description.contains("KDF") {
             throw CLIError("\(error.description)\n  the Bitwarden CLI does not understand this server's login settings; "
                 + "pin a CLI that matches the server in [vault.\(vault)]: cli = \"npx -y @bitwarden/cli@<version>\"")
@@ -111,6 +108,8 @@ struct Bitwarden: ExternalBackend {
     }
 
     /// Interactive: configure server, log in if needed, unlock; returns the session key.
+    /// sx asks for everything itself and runs `bw` without a terminal: a child process does not own
+    /// the terminal, so the CLI's own prompts (raw mode) cannot read it.
     func login() throws -> String {
         if let server {
             try FileManager.default.createDirectory(atPath: env["BITWARDENCLI_APPDATA_DIR"]!, withIntermediateDirectories: true)
@@ -119,25 +118,36 @@ struct Bitwarden: ExternalBackend {
         let status = (try? bw(["status"], env: env)).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
         if status?["status"] as? String == "unauthenticated" {
             stderrPrint("Logging in to Bitwarden\(server.map { " (\($0))" } ?? "")…")
-            // Fully interactive (email, password, 2FA); its output is not needed.
+            let email = try prompt("Email: ", echo: true)
+            var e = env
+            e["SX_BW_PASSWORD"] = try prompt("Master password: ", echo: false)
+            let login = ["login", email, "--passwordenv", "SX_BW_PASSWORD", "--raw", "--nointeraction"]
+            let out: Data
             do {
-                _ = try bw(["login"], env: env, interactive: true)
-            } catch let error as CLIError where server != nil {
-                // Interactive output is not captured, so the KDF case cannot be told apart here.
-                throw CLIError("\(error.description)\n  if it said `KDF config response does not contain a valid KDF type`, "
-                    + "pin a CLI that matches the server in [vault.\(vault)]: cli = \"npx -y @bitwarden/cli@<version>\"")
+                out = try bw(login, env: e)
+            } catch let error as CLIError where VaultConfig.bitwardenNeedsSecondFactor(error.description) {
+                let method = try prompt("Two-step method (0 authenticator, 1 e-mail, 3 YubiKey) [0]: ", echo: true)
+                let code = try prompt("Two-step code: ", echo: true)
+                out = try bw(login + ["--method", method.isEmpty ? "0" : method, "--code", code], env: e)
             }
+            let session = String(decoding: out, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !session.isEmpty else { throw CLIError("bw login returned no session") }
+            return session
         }
-        // Read the master password ourselves so bw's prompt does not land in captured stdout.
-        var buf = [CChar](repeating: 0, count: 1024)
-        guard let p = readpassphrase("Bitwarden master password for \(vault): ", &buf, buf.count, 0) else { throw CLIError("no input") }
         var e = env
-        e["SX_BW_PASSWORD"] = String(cString: p)
-        buf.withUnsafeMutableBufferPointer { memset_s($0.baseAddress, $0.count, 0, $0.count) }
+        e["SX_BW_PASSWORD"] = try prompt("Bitwarden master password for \(vault): ", echo: false)
         let session = String(decoding: try bw(["unlock", "--passwordenv", "SX_BW_PASSWORD", "--raw"], env: e), as: UTF8.self)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !session.isEmpty else { throw CLIError("bw unlock returned no session") }
         return session
+    }
+
+    /// Reads one line from the terminal (not stdin); the buffer is wiped after use.
+    private func prompt(_ text: String, echo: Bool) throws -> String {
+        var buf = [CChar](repeating: 0, count: 1024)
+        defer { buf.withUnsafeMutableBufferPointer { _ = memset_s($0.baseAddress, $0.count, 0, $0.count) } }
+        guard let p = readpassphrase(text, &buf, buf.count, echo ? RPP_ECHO_ON : 0) else { throw CLIError("no input") }
+        return String(cString: p).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func split(_ name: String) -> (String, String?) {

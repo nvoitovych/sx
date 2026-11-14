@@ -36,6 +36,14 @@ public struct VaultConfig: Equatable {
         let words = (settings["cli"] ?? "").split(whereSeparator: \.isWhitespace).map(String.init)
         return words.isEmpty ? ["bw"] : words
     }
+
+    /// The Bitwarden CLI's answer to a non-interactive login without a code when the account has
+    /// two-step login on (`Code is required.`; several providers: `No provider selected.`) — the cue to
+    /// ask for the method and code and retry.
+    public static func bitwardenNeedsSecondFactor(_ message: String) -> Bool {
+        let m = message.lowercased()
+        return m.contains("code is required") || m.contains("no provider selected")
+    }
 }
 
 public struct SxConfig: Equatable {

@@ -79,6 +79,13 @@ final class VaultConfigTests: XCTestCase {
         XCTAssertThrowsError(try SxConfig.parse("[vault.team]\nbackend = \"bitwarden\"\ncli = \"  \""))
     }
 
+    func testBitwardenSecondFactorCueIsTheCLIsOwnAnswer() {
+        XCTAssertTrue(VaultConfig.bitwardenNeedsSecondFactor("bw failed: Code is required."))
+        XCTAssertTrue(VaultConfig.bitwardenNeedsSecondFactor("bw failed: Login failed. No provider selected."))
+        XCTAssertFalse(VaultConfig.bitwardenNeedsSecondFactor("bw failed: Username or password is incorrect. Try again"))
+        XCTAssertFalse(VaultConfig.bitwardenNeedsSecondFactor("bw failed: KDF config response does not contain a valid KDF type"))
+    }
+
     func testUnknownRouteTargetFails() {
         XCTAssertThrowsError(try SxConfig.parse("[route]\n\"/a/**\" = \"nope\""))
     }
