@@ -59,6 +59,26 @@ final class VaultConfigTests: XCTestCase {
         XCTAssertEqual(c.vault(forPath: "/Users/x/personal").name, "personal")
     }
 
+    func testBitwardenCLIIsBwUnlessTheVaultPinsOne() throws {
+        let c = try SxConfig.parse("""
+        [vault.team]
+        backend = "bitwarden"
+        [vault.selfhosted]
+        backend = "bitwarden"
+        server = "https://vault.example.com"
+        cli = "npx -y  @bitwarden/cli@2025.12.1"
+        """)
+        XCTAssertEqual(c.vaults["team"]?.bitwardenCLI, ["bw"])
+        XCTAssertEqual(c.vaults["team"]?.kind, "bitwarden")
+        XCTAssertEqual(c.vaults["selfhosted"]?.bitwardenCLI, ["npx", "-y", "@bitwarden/cli@2025.12.1"])
+        XCTAssertEqual(c.vaults["selfhosted"]?.kind, "bitwarden (npx -y @bitwarden/cli@2025.12.1)")
+        XCTAssertEqual(c.vaults["selfhosted"]?.backend, .bitwarden(server: "https://vault.example.com"))
+    }
+
+    func testAnEmptyBitwardenCLIIsRefused() {
+        XCTAssertThrowsError(try SxConfig.parse("[vault.team]\nbackend = \"bitwarden\"\ncli = \"  \""))
+    }
+
     func testUnknownRouteTargetFails() {
         XCTAssertThrowsError(try SxConfig.parse("[route]\n\"/a/**\" = \"nope\""))
     }

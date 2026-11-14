@@ -11,7 +11,7 @@ enum Backends {
     static func make(_ vault: VaultConfig) throws -> ExternalBackend {
         switch vault.backend {
         case .keychain: throw CLIError("keychain vaults go through Sx.app")
-        case let .bitwarden(server): return Bitwarden(vault: vault.name, server: server)
+        case let .bitwarden(server): return Bitwarden(vault: vault.name, server: server, cli: vault.bitwardenCLI)
         case let .onePassword(account): return OnePassword(account: account)
         case let .plugin(command): return Plugin(command: command, vault: vault)
         }
@@ -60,6 +60,20 @@ func runTool(_ path: String, _ args: [String], env extra: [String: String] = [:]
 struct Bitwarden: ExternalBackend {
     let vault: String
     let server: String?
+    /// argv of the Bitwarden CLI (`VaultConfig.bitwardenCLI`): `bw`, or a pinned one such as
+    /// `npx -y @bitwarden/cli@<version>`.
+    let cli: [String]
+
+    /// Runs the vault's CLI. A CLI newer than a self-hosted server can fail to read the server's
+    /// key-derivation answer; that failure names the fix instead of only the CLI's own words.
+    private func bw(_ args: [String], env: [String: String], interactive: Bool = false) throws -> Data {
+        do {
+            return try runTool(cli[0], Array(cli.dropFirst()) + args, env: env, interactive: interactive)
+        } catch let error as CLIError where error.description.contains("KDF") {
+            throw CLIError("\(error.description)\n  the Bitwarden CLI does not understand this server's login settings; "
+                + "pin a CLI that matches the server in [vault.\(vault)]: cli = \"npx -y @bitwarden/cli@<version>\"")
+        }
+    }
 
     /// A separate bw data dir per vault lets several Bitwarden servers coexist.
     var env: [String: String] {
@@ -76,7 +90,7 @@ struct Bitwarden: ExternalBackend {
     /// `name` or `name#field`: password, then notes, unless a custom field is named.
     func get(_ name: String, session: String?) throws -> Data {
         let (item, field) = split(name)
-        let json = try runTool("bw", ["get", "item", item, "--nointeraction"], env: env(session: session))
+        let json = try bw(["get", "item", item, "--nointeraction"], env: env(session: session))
         guard let obj = try JSONSerialization.jsonObject(with: json) as? [String: Any] else { throw CLIError("bw: unexpected output for \(item)") }
         if let field {
             let fields = obj["fields"] as? [[String: Any]] ?? []
@@ -91,7 +105,7 @@ struct Bitwarden: ExternalBackend {
     }
 
     func list(session: String?) throws -> [String] {
-        let json = try runTool("bw", ["list", "items", "--nointeraction"], env: env(session: session))
+        let json = try bw(["list", "items", "--nointeraction"], env: env(session: session))
         let items = try JSONSerialization.jsonObject(with: json) as? [[String: Any]] ?? []
         return items.compactMap { $0["name"] as? String }.sorted()
     }
@@ -100,13 +114,19 @@ struct Bitwarden: ExternalBackend {
     func login() throws -> String {
         if let server {
             try FileManager.default.createDirectory(atPath: env["BITWARDENCLI_APPDATA_DIR"]!, withIntermediateDirectories: true)
-            _ = try? runTool("bw", ["config", "server", server], env: env)
+            _ = try? bw(["config", "server", server], env: env)
         }
-        let status = (try? runTool("bw", ["status"], env: env)).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        let status = (try? bw(["status"], env: env)).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
         if status?["status"] as? String == "unauthenticated" {
             stderrPrint("Logging in to Bitwarden\(server.map { " (\($0))" } ?? "")…")
             // Fully interactive (email, password, 2FA); its output is not needed.
-            _ = try runTool("bw", ["login"], env: env, interactive: true)
+            do {
+                _ = try bw(["login"], env: env, interactive: true)
+            } catch let error as CLIError where server != nil {
+                // Interactive output is not captured, so the KDF case cannot be told apart here.
+                throw CLIError("\(error.description)\n  if it said `KDF config response does not contain a valid KDF type`, "
+                    + "pin a CLI that matches the server in [vault.\(vault)]: cli = \"npx -y @bitwarden/cli@<version>\"")
+            }
         }
         // Read the master password ourselves so bw's prompt does not land in captured stdout.
         var buf = [CChar](repeating: 0, count: 1024)
@@ -114,7 +134,7 @@ struct Bitwarden: ExternalBackend {
         var e = env
         e["SX_BW_PASSWORD"] = String(cString: p)
         buf.withUnsafeMutableBufferPointer { memset_s($0.baseAddress, $0.count, 0, $0.count) }
-        let session = String(decoding: try runTool("bw", ["unlock", "--passwordenv", "SX_BW_PASSWORD", "--raw"], env: e), as: UTF8.self)
+        let session = String(decoding: try bw(["unlock", "--passwordenv", "SX_BW_PASSWORD", "--raw"], env: e), as: UTF8.self)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !session.isEmpty else { throw CLIError("bw unlock returned no session") }
         return session

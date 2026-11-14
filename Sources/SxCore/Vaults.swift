@@ -23,10 +23,18 @@ public struct VaultConfig: Equatable {
     public var kind: String {
         switch backend {
         case .keychain: return "keychain"
-        case .bitwarden: return "bitwarden"
+        case .bitwarden: return settings["cli"] == nil ? "bitwarden" : "bitwarden (\(bitwardenCLI.joined(separator: " ")))"
         case .onePassword: return "1password"
         case let .plugin(command): return "plugin (\(command))"
         }
+    }
+
+    /// The command that runs the Bitwarden CLI, as argv: `bw` unless the vault's `cli` names another.
+    /// A self-hosted server can lag the CLI's protocol; `cli = "npx -y @bitwarden/cli@<version>"`
+    /// pins a CLI that still speaks it, for that vault only.
+    public var bitwardenCLI: [String] {
+        let words = (settings["cli"] ?? "").split(whereSeparator: \.isWhitespace).map(String.init)
+        return words.isEmpty ? ["bw"] : words
     }
 }
 
@@ -73,7 +81,11 @@ public struct SxConfig: Equatable {
                 let backend: VaultConfig.Backend
                 switch s["backend"] ?? "keychain" {
                 case "keychain": backend = .keychain
-                case "bitwarden": backend = .bitwarden(server: s["server"])
+                case "bitwarden":
+                    if let cli = s["cli"], cli.allSatisfy(\.isWhitespace) {
+                        throw ConfigError("vault \(name): `cli` is empty; omit it to use `bw`")
+                    }
+                    backend = .bitwarden(server: s["server"])
                 case "1password", "onepassword": backend = .onePassword(account: s["account"])
                 case "plugin":
                     guard let cmd = s["command"] ?? s["type"].map({ "sx-backend-\($0)" }) else {

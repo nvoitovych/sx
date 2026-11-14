@@ -253,7 +253,7 @@ func main() throws -> Int32 {
         guard case let .bitwarden(server) = vault.backend else {
             throw CLIError("\(name) is \(vault.kind); only Bitwarden vaults need `sx login` (1Password uses its own app unlock)")
         }
-        let session = try Bitwarden(vault: name, server: server).login()
+        let session = try Bitwarden(vault: name, server: server, cli: vault.bitwardenCLI).login()
         try put(Backends.sessionName(name), Data(session.utf8), tags: ["internal"], allowInternal: true)
         print("✓ \(name) unlocked; session stored in the keychain (sx run asks before using it)")
 

@@ -66,6 +66,7 @@ default = "personal"            # the built-in iCloud Keychain vault
 [vault.work]
 backend = "bitwarden"
 server  = "https://vault.example.com"   # optional; omit for bitwarden.com
+cli     = "npx -y @bitwarden/cli@2025.12.1"  # optional; default `bw`
 
 [vault.client]
 backend = "1password"
@@ -81,6 +82,7 @@ type    = "hashicorp"                   # runs `sx-backend-hashicorp`
 ```
 
 - **Bitwarden**: `sx login work` unlocks once (`bw` CLI) and keeps the session in the keychain; `sx run` asks before using it. Names are item names; `item#field` reads a custom field.
+  A self-hosted server (e.g. Vaultwarden) can lag the newest `bw`: if login fails with `KDF config response does not contain a valid KDF type`, pin a CLI version that matches the server with `cli` for that vault only.
 - **1Password**: names are `Vault/Item` or `Vault/Item/field`; `op` handles its own unlock.
 - **Your own backend**: any executable, see [docs/plugins.md](docs/plugins.md).
 
