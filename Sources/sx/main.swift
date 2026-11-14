@@ -12,12 +12,15 @@ Run
                                     as dotenv to PATH (mode 600) for the run only, e.g. wrangler's .dev.vars
 Keychain secrets
   sx put NAME [--tag T] [--file P]  store a secret (value from --file, stdin, or hidden prompt)
+  sx put NAME --vault V [--file P] [--about TEXT] [--collection C]
+                                    store in a Bitwarden vault (organization from the vault's config); never overwrites
   sx import-env FILE --prefix P [--out F] [--tag T] [--literal K1,K2] [--dedupe-with P2] [--remove-original]
                                     move a dotenv file into sx; writes .env.sx with references
   sx import-file PATH --name NAME [--tag T] [--remove-original]
   sx verify NAME (--file P | stdin) compare by hash, never by value
   sx export NAME --out PATH         write a key file back to disk (human-only, Touch ID)
-  sx ls [--vault V] [--json]        list secret names
+  sx ls [--vault V] [--json] [--collections]
+                                    list secret names (Bitwarden: --collections lists where put can file)
   sx rm NAME                        delete a secret (Touch ID)
 Vaults (~/.config/sx/config.toml)
   sx vaults                         configured vaults and the one this directory routes to
@@ -47,7 +50,8 @@ struct Flags {
     var values: [String: [String]] = [:]
     var switches: Set<String> = []
 
-    static let valued: Set<String> = ["--tag", "--file", "--prefix", "--out", "--name", "--literal", "--dedupe-with", "--vault"]
+    static let valued: Set<String> = ["--tag", "--file", "--prefix", "--out", "--name", "--literal", "--dedupe-with", "--vault",
+                                      "--about", "--collection"]
 
     init(_ args: [String]) throws {
         var i = 0
@@ -126,6 +130,16 @@ func main() throws -> Int32 {
     case "put":
         let f = try Flags(args)
         guard let name = f.positional.first else { throw CLIError("usage: sx put NAME") }
+        if let vaultName = f.one("--vault") {
+            guard let vault = try SxConfig.load().vaults[vaultName] else { throw CLIError("unknown vault \(vaultName)") }
+            if vault.backend != .keychain {
+                let value = try readSecretValue(file: f.one("--file"))
+                try Backends.make(vault).put(name, value: value, about: f.one("--about"), collection: f.one("--collection"),
+                                             session: try storedSession(vault))
+                print("✓ \(name) → \(vault.name)  sha:\(shortHash(value))")
+                return 0
+            }
+        }
         try put(name, readSecretValue(file: f.one("--file")), tags: f.all("--tag"))
         print("✓ \(name)")
 
@@ -209,7 +223,10 @@ func main() throws -> Int32 {
             guard let vault = config.vaults[name] else { throw CLIError("unknown vault \(name)") }
             if vault.backend != .keychain {
                 let session = try storedSession(vault)
-                for n in try Backends.make(vault).list(session: session) { print(n) }
+                let backend = try Backends.make(vault)
+                for n in try f.switches.contains("--collections") ? backend.collections(session: session) : backend.list(session: session) {
+                    print(n)
+                }
                 return 0
             }
         }
@@ -253,7 +270,7 @@ func main() throws -> Int32 {
         guard case let .bitwarden(server) = vault.backend else {
             throw CLIError("\(name) is \(vault.kind); only Bitwarden vaults need `sx login` (1Password uses its own app unlock)")
         }
-        let session = try Bitwarden(vault: name, server: server).login()
+        let session = try Bitwarden(vault: name, server: server, cli: vault.bitwardenCLI).login()
         try put(Backends.sessionName(name), Data(session.utf8), tags: ["internal"], allowInternal: true)
         print("✓ \(name) unlocked; session stored in the keychain (sx run asks before using it)")
 
