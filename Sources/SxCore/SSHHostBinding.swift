@@ -48,7 +48,7 @@ public enum SSHFingerprint {
 }
 
 /// Verifies SSH signature blobs (`string algorithm, string signature`) against public key blobs.
-/// Host keys: ssh-ed25519, ecdsa-sha2-nistp256/384/521, ssh-rsa (rsa-sha2-256/512, ssh-rsa).
+/// Host keys: ssh-ed25519, ecdsa-sha2-nistp256/384/521, ssh-rsa (rsa-sha2-256/512 only).
 public enum SSHSignatureVerifier {
     public static func verify(publicKeyBlob: [UInt8], signatureBlob: [UInt8], data: Data) -> Bool {
         var k = SSHReader(Data(publicKeyBlob))
@@ -88,8 +88,7 @@ public enum SSHSignatureVerifier {
             switch sigType {
             case "rsa-sha2-256": alg = .rsaSignatureMessagePKCS1v15SHA256
             case "rsa-sha2-512": alg = .rsaSignatureMessagePKCS1v15SHA512
-            case "ssh-rsa": alg = .rsaSignatureMessagePKCS1v15SHA1
-            default: return false
+            default: return false // no SHA-1 ("ssh-rsa") signatures: OpenSSH has not sent them for session-bind
             }
             guard let e = try? k.string(), let n = try? k.string(), k.remaining == 0 else { return false }
             let der = DER.sequence([DER.integer(n), DER.integer(e)])
@@ -115,6 +114,8 @@ public struct SSHUserAuthRequest: Equatable {
     public let sessionID: [UInt8]
     public let user: String
     public let method: String
+    /// The user key the request authenticates with (must be the key asked to sign).
+    public let publicKey: [UInt8]
     /// Server host key, present for `publickey-hostbound-v00@openssh.com`.
     public let hostKey: [UInt8]?
 
@@ -124,7 +125,7 @@ public struct SSHUserAuthRequest: Equatable {
               let user = try? r.text(), let service = try? r.text(), service == "ssh-connection",
               let method = try? r.text() else { return nil }
         guard method == "publickey" || method == "publickey-hostbound-v00@openssh.com",
-              let hasSig = try? r.byte(), hasSig != 0, (try? r.text()) != nil, (try? r.string()) != nil else { return nil }
+              let hasSig = try? r.byte(), hasSig != 0, (try? r.text()) != nil, let key = try? r.string() else { return nil }
         var hostKey: [UInt8]?
         if method == "publickey-hostbound-v00@openssh.com" {
             guard let hk = try? r.string() else { return nil }
@@ -134,17 +135,31 @@ public struct SSHUserAuthRequest: Equatable {
         sessionID = sid
         self.user = user
         self.method = method
+        publicKey = key
         self.hostKey = hostKey
     }
 
-    /// Which server a sign request is for, given the bindings `ssh` sent on this agent connection.
-    /// Nil unless the last binding verified, nothing was forwarded, and the payload's session (and,
-    /// for host-bound auth, host key) match it — the same rule OpenSSH's own agent applies.
-    public static func boundHost(payload: Data, bindings: [SSHHostBinding]) -> SSHHostBinding? {
+    /// Which server a sign request is for, given the (verified) bindings `ssh` sent on this agent
+    /// connection. Nil unless nothing was forwarded, the payload is a login for the bound session with
+    /// the key being asked to sign, and (host-bound auth) names the bound host key — as OpenSSH's agent checks.
+    public static func boundHost(payload: Data, bindings: [SSHHostBinding], key: [UInt8]) -> SSHHostBinding? {
         guard let last = bindings.last, !bindings.contains(where: \.isForwarding),
-              let auth = SSHUserAuthRequest(payload: payload), auth.sessionID == last.sessionID else { return nil }
+              let auth = SSHUserAuthRequest(payload: payload), auth.sessionID == last.sessionID,
+              auth.publicKey == key else { return nil }
         if let hk = auth.hostKey, hk != last.hostKey { return nil }
         return last
+    }
+}
+
+/// `ssh-keygen -Y sign` data (PROTOCOL.sshsig): what is signed is tied to a namespace, e.g. "git".
+public enum SSHSignedData {
+    public static func namespace(_ payload: Data) -> String? {
+        let magic = Array("SSHSIG".utf8)
+        guard payload.count > magic.count, Array(payload.prefix(magic.count)) == magic else { return nil }
+        var r = SSHReader(payload.dropFirst(magic.count))
+        guard let ns = try? r.text(), !ns.isEmpty, (try? r.string()) != nil, (try? r.text()) != nil,
+              (try? r.string()) != nil, r.remaining == 0 else { return nil }
+        return ns
     }
 }
 

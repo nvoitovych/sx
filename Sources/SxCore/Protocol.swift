@@ -34,6 +34,9 @@ public struct BrokerRequest: Codable, Equatable {
     public var projectFile: String?
     /// `approve`: pending request ids exactly as shown to the human.
     public var ids: [Int]?
+    /// `approve`: the token of each id, as listed. An entry with the same number but another token
+    /// (Sx.app restarted, numbers reused) is refused.
+    public var tokens: [String]?
     /// `approve`: the account password, typed at a terminal. Never logged or stored.
     public var password: String?
     /// `approve`: remember for this many seconds (capped at 24 h) instead of approving once.
@@ -113,6 +116,8 @@ public struct PendingInfo: Codable, Equatable {
     }
 
     public var id: Int
+    /// Unguessable, per request: `sx approve` sends it back so the approval applies to this request only.
+    public var token: String
     /// "ssh-sign", "secrets", or "other" (deletes, exports, trust…: Touch ID only).
     public var kind: String
     /// One line: what would happen, e.g. "sign in with ssh/id_ed25519 to batman".
@@ -122,9 +127,12 @@ public struct PendingInfo: Codable, Equatable {
     /// Caller's process chain, nearest first (e.g. ssh ← git ← zsh ← claude).
     public var chain: [String]
     public var command: String?
+    /// The command as separate arguments (`sx run`), shown shell-quoted.
+    public var argv: [String]?
     public var cwd: String?
     public var names: [String]
-    /// SSH: the destination as typed (an alias) and the server's verified host key fingerprint.
+    /// SSH: the destination as the caller typed it (an alias anyone can repoint: display only) and the
+    /// fingerprint of the host key the server proved (session-bind), which is what a grant is tied to.
     public var host: String?
     public var hostKey: String?
     public var prod: Bool
@@ -132,23 +140,28 @@ public struct PendingInfo: Codable, Equatable {
     public var terminal: Bool
     /// `--for` is possible (not prod, not Touch-ID-only). For SSH without a verified host also `--any-host`.
     public var canGrant: Bool
+    /// After it timed out it can still be approved for its retry (false when its class is unique to it:
+    /// an SSH login whose server is not verified, or unknown data).
+    public var retryable: Bool
     public var created: Date
     /// When the live request gives up (waiting only).
     public var deadline: Date?
     public var ended: Date?
     public var state: String
 
-    public init(id: Int = 0, kind: String, what: String, who: String, agent: String?, chain: [String],
-                command: String?, cwd: String?, names: [String], host: String? = nil, hostKey: String? = nil,
-                prod: Bool, terminal: Bool, canGrant: Bool, created: Date = Date(), deadline: Date? = nil,
+    public init(id: Int = 0, token: String = "", kind: String, what: String, who: String, agent: String?, chain: [String],
+                command: String?, argv: [String]? = nil, cwd: String?, names: [String], host: String? = nil, hostKey: String? = nil,
+                prod: Bool, terminal: Bool, canGrant: Bool, retryable: Bool = true, created: Date = Date(), deadline: Date? = nil,
                 ended: Date? = nil, state: String = State.waiting) {
         self.id = id
+        self.token = token
         self.kind = kind
         self.what = what
         self.who = who
         self.agent = agent
         self.chain = chain
         self.command = command
+        self.argv = argv
         self.cwd = cwd
         self.names = names
         self.host = host
@@ -156,6 +169,7 @@ public struct PendingInfo: Codable, Equatable {
         self.prod = prod
         self.terminal = terminal
         self.canGrant = canGrant
+        self.retryable = retryable
         self.created = created
         self.deadline = deadline
         self.ended = ended

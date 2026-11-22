@@ -843,7 +843,9 @@ struct TerminalApprovalsSetting: View {
 
     private func set(_ on: Bool) {
         guard on else {
-            state = (try? TerminalApprovalStore.update { $0.enabled = false; $0.disabledReason = nil; $0.failures = [] }) ?? TerminalApprovalStore.load()
+            Broker.passwordLock.lock()
+            state = (try? TerminalApprovalStore.update { $0.turnOff() }) ?? TerminalApprovalStore.load()
+            Broker.passwordLock.unlock()
             return
         }
         let card = ApprovalPanel.Request(title: "wants to allow approvals from a terminal", who: "You", command: nil,

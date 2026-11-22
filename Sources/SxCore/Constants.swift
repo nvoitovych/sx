@@ -15,6 +15,11 @@ public enum SX {
     public static let clientRequirement =
         "anchor apple generic and certificate leaf[subject.OU] = \"\(teamID)\" and identifier \"\(cliIdentifier)\""
 
+    /// Code requirement the CLI checks on the broker before sending it a password (`sx approve`):
+    /// a process that took over the socket path must not receive it.
+    public static let appRequirement =
+        "anchor apple generic and certificate leaf[subject.OU] = \"\(teamID)\" and identifier \"\(appBundleID)\""
+
     /// Real home directory, even inside the app sandbox.
     public static var realHome: String {
         if let pw = getpwuid(getuid()), let dir = pw.pointee.pw_dir {
