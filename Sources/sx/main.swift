@@ -31,6 +31,13 @@ SSH
   sx ssh import PATH [--name N]     store an OpenSSH private key (ed25519/rsa) for the sx SSH agent
   sx ssh list                       keys the agent offers, with fingerprints
   sx ssh setup [--write]            point ssh at the sx agent (prints, or appends to ~/.ssh/config)
+Approvals (when Touch ID is out of reach, e.g. working on this Mac from a phone)
+  sx pending [--json]               requests waiting for approval: id, what, who asks (process chain)
+  sx approve ID… | --all [--for 8h [--any-host]]
+                                    approve with your macOS login password typed in this terminal;
+                                    --for also allows the same kind of request (SSH: key + server) for a while
+  sx grants [--json]                remembered approvals;  sx revoke ID… | --all  removes them
+  sx approvals [on|off]             terminal approvals switch (on: Touch ID once at the Mac)
 Other
   sx status                         broker, agent detection, vault routing
 
@@ -51,7 +58,7 @@ struct Flags {
     var switches: Set<String> = []
 
     static let valued: Set<String> = ["--tag", "--file", "--prefix", "--out", "--name", "--literal", "--dedupe-with", "--vault",
-                                      "--about", "--collection"]
+                                      "--about", "--collection", "--for"]
 
     init(_ args: [String]) throws {
         var i = 0
@@ -289,6 +296,21 @@ func main() throws -> Int32 {
 
     case "ssh":
         return try SSHCommands.run(args)
+
+    case "pending":
+        return try ApprovalCommands.pending(args)
+
+    case "approve":
+        return try ApprovalCommands.approve(args)
+
+    case "grants":
+        return try ApprovalCommands.grants(args)
+
+    case "revoke":
+        return try ApprovalCommands.revoke(args)
+
+    case "approvals":
+        return try ApprovalCommands.approvals(args)
 
     case "version", "--version", "-v":
         print("sx \(SX.version)")

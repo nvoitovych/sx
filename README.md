@@ -122,10 +122,50 @@ ssh -T git@github.com
 
 Private keys never leave Sx.app; `ssh` gets public keys and signatures. The first use of a key by a given caller shows a card with the process chain (e.g. `ssh ← git ← claude`). Passphrase-protected keys must be stored as an unencrypted copy — the keychain and Touch ID take the passphrase's role.
 
+### Approving from a terminal (when Touch ID is out of reach)
+
+Working on this Mac from a phone or another computer (a remote terminal, Orca mobile, SSH), you cannot touch Touch ID, so requests time out and `ssh` says `agent refused operation`. Turn on terminal approvals once, at the Mac:
+
+```sh
+sx approvals on          # Touch ID; stored in this Mac's keychain, not synced
+```
+
+Then, from any terminal on the Mac:
+
+```console
+$ sx pending
+#7  sign in with ssh/id_ed25519 to the server with host key SHA256:3v… (caller calls it batman)  [timed out — approve and the next try passes]
+     who:   Claude Code (AI agent)  ·  asked 13:05:12
+     chain: ssh ← git ← zsh ← claude ← orca-provider-exec
+     host:  host key SHA256:3v…  (the caller calls it batman)
+     keys:  ssh/id_ed25519
+
+$ sx approve 7 --for 8h
+You are approving this request: …
+and remembering, for 8 h (until about 21:06), every request of the same kind:
+  #7 → Claude Code: logins with ssh/id_ed25519 to the server with host key SHA256:3v… only (the caller calls it batman)
+macOS login password for nv:
+✓ #7 approved — its next try passes; the same kind of request passes until 21:06
+```
+
+- `sx approve ID…` or `--all` approves once; a request that already timed out passes on its next try (within 15 min). `--for 8h` (at most 24 h) also remembers the same kind of request:
+  - SSH login: this key **for that server only**, identified by the host key the server proves to the agent (`session-bind@openssh.com`, sent by OpenSSH 8.9+). The name the caller typed (`batman`) is shown but never trusted: anyone can repoint it in `~/.ssh/config`. Compare the host key fingerprint with the one you know.
+  - `ssh-keygen -Y sign` (e.g. git commit signing): this key for that namespace (`git`) — for the whole time, the agent can sign any commit or tag with it.
+  - `sx run`: this command line in this project with these secrets (what the command does can still change, e.g. `package.json` scripts).
+  - Anything else (a login whose server is not verified, a forwarded agent, unknown data) can only be approved once while it waits. `--for 8h --any-host` allows the key for everything.
+- Every listed request carries a token that `sx approve` sends back: if Sx.app restarted and the numbers were reused, the old number approves nothing. Text from the requester (command lines, paths, host names) is shown with control and invisible characters escaped and arguments shell-quoted.
+- `sx grants` lists remembered approvals, `sx revoke ID` / `sx revoke --all` removes them (anyone may revoke). `sx approvals off` turns terminal approvals off; turning them on again needs Touch ID.
+- Prod-tagged keys: once only, never `--for`, and no timed grant covers them. Deletes, exports (`sx export`) and `sx trust` stay Touch ID only.
+- Sx.app checks the password (Open Directory), never the CLI, and the CLI sends it only after checking that the process behind the socket is Sx.app signed by the same team. It is read from the terminal with echo off; argv, environment and piped stdin are refused — the command fails without a terminal, so an agent that runs it gets told to hand it to you. 5 wrong passwords in 15 min lock it for 15 min; 10 in 24 h (successes in between do not reset that) turn terminal approvals off until Touch ID. After an approval you are told how many wrong passwords came since your last one. Every approval, grant and wrong password goes to the audit log.
+- Anyone may run `sx pending`, and an agent may even start `sx approve`: the gate is the password, which only you know.
+
+> **Type the password only into a terminal you opened yourself** (e.g. an Orca terminal pane you created), after you typed `sx approve` there. A process that owns a terminal (pty) reads every keystroke: never type it into a terminal or a prompt an agent created or wrapped (`script`, `expect`, a tmux session it started, a terminal it opened via `orca terminal create`), and never paste it into a chat. Check what the command prints before typing: it lists exactly which requests and which scope you approve.
+
 ## Security model
 
 - **Storage**: keychain items in the data-protection keychain, access group `<TEAM>.dev.nvlab.sx`, synchronizable through iCloud Keychain (end-to-end encrypted by Apple). Only an app signed by that team with that entitlement can read them.
 - **Broker**: Sx.app listens on a Unix socket in its app-group container. Every connection's code signature is checked via its audit token; only the `sx` binary signed by the same team (`identifier dev.nvlab.sx.cli`) is served. Other processes are refused.
+- **Terminal approvals** (off until turned on with Touch ID): the macOS login password typed at a terminal approves listed requests; Sx.app verifies it and rate-limits attempts. Its strength is the password's: a process that can read your keystrokes can reuse it (see the warning above).
 - **Approval**: Sx.app decides, not the CLI. Agent detection uses the caller's process ancestry, which an agent cannot rewrite (environment variables are a secondary signal).
 - **Trust store**: `.sx.toml` approvals are keychain items on this Mac only — not files an agent could edit.
 - **No network**: neither the app nor the CLI makes network calls. Bitwarden/1Password/plugin backends are their own tools.

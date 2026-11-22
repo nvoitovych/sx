@@ -58,8 +58,8 @@ final class Broker {
     }
 
     private func handle(_ req: BrokerRequest, peer: PeerIdentity, fd: Int32) -> BrokerResponse {
-        func approve(_ card: ApprovalPanel.Request, reason: String, key: String?, clientFD: Int32? = nil) -> String? {
-            self.approve(card, reason: reason, key: key, clientFD: fd)
+        func approve(_ card: ApprovalPanel.Request, reason: String, key: String?, context: ApprovalContext? = nil) -> String? {
+            self.approve(card, reason: reason, key: key, clientFD: fd, context: context)
         }
         func audit(_ names: [String], _ outcome: String) {
             AuditLog.shared.record(.init(time: Date(), op: req.op.rawValue, client: peer.label, agent: req.agent,
@@ -141,12 +141,15 @@ final class Broker {
 
                 if !(preApproved && !prod) {
                     let reason = "\(who) runs `\(argv.prefix(4).joined(separator: " "))` in \(((req.cwd ?? "?") as NSString).lastPathComponent) with \(shown.joined(separator: ", "))"
-                    let key = prod ? nil : Approver.shared.key(cwd: req.cwd ?? "", argv: argv, names: names + external)
+                    let classKey = Approver.shared.key(cwd: req.cwd ?? "", argv: argv, names: names + external)
+                    let key = prod ? nil : classKey
+                    let context = ApprovalContext(kind: "secrets", what: "use \(shown.count) secret\(shown.count == 1 ? "" : "s") for a command",
+                                                  terminal: true, classKey: classKey, chain: Self.chain(peer.pid), argv: argv, canGrant: !prod)
                     let card = ApprovalPanel.Request(title: "wants to use \(shown.count) \(shown.count == 1 ? "key" : "keys")", who: who, isAgent: req.agent != nil,
                                                      command: argv.joined(separator: " "),
                                                      project: req.cwd, secrets: shown, alwaysAsk: prod, isProduction: prod,
                                                      note: "Keys go to this command only. Its output is masked.")
-                    if let why = approve(card, reason: reason, key: key) {
+                    if let why = approve(card, reason: reason, key: key, context: context) {
                         audit(shown, "denied: \(why)")
                         return .fail("not approved: \(why)")
                     }
@@ -191,6 +194,36 @@ final class Broker {
                 try ProjectTrust.trust(file, data: data)
                 audit([], "trusted \(file)")
                 return BrokerResponse(ok: true)
+
+            case .pending:
+                return BrokerResponse(ok: true, pending: PendingRegistry.shared.list())
+
+            case .grants:
+                return BrokerResponse(ok: true, grants: Approver.shared.grantInfos)
+
+            case .revoke:
+                // Taking power away needs no proof; anyone, agents included, may revoke.
+                if req.name == "all" {
+                    Approver.shared.revokeAll()
+                    audit([], "revoked all approvals")
+                    return BrokerResponse(ok: true, lines: ["✓ all remembered approvals revoked"])
+                }
+                var lines: [String] = []
+                for g in req.grantIDs ?? [] {
+                    let n = Approver.shared.revoke(g)
+                    lines.append(n > 0 ? "✓ revoked \(g)" : "no approval \(g) (ids need at least 4 characters; see `sx grants`)")
+                    audit([], n > 0 ? "revoked \(g)" : "revoke \(g): none")
+                }
+                return BrokerResponse(ok: true, lines: lines)
+
+            case .approvals:
+                return try approvals(req, peer: peer, approve: { approve($0, reason: $1, key: nil) }, audit: { audit([], $0) })
+
+            case .approve:
+                return approveFromTerminal(req, peer: peer, audit: { names, outcome, chain in
+                    AuditLog.shared.record(.init(time: Date(), op: "approve", client: chain, command: req.ids.map { "sx approve \($0.map(String.init).joined(separator: " "))" },
+                                                 names: names, outcome: outcome))
+                })
             }
         } catch {
             audit(req.names ?? req.name.map { [$0] } ?? [], "error")
@@ -199,18 +232,192 @@ final class Broker {
     }
 
     /// `key == nil` means always prompt (no "remember" option). Returns nil when approved, otherwise why not.
-    func approve(_ card: ApprovalPanel.Request, reason: String, key: String?, clientFD: Int32? = nil) -> String? {
-        if let key, Approver.shared.isApproved(key) { return nil }
-        approvalGate.lock()
-        defer { approvalGate.unlock() }
-        if let key, Approver.shared.isApproved(key) { return nil }
-        let reasonText = reason.count > 180 ? String(reason.prefix(177)) + "…" : reason
-        let result = Approver.shared.authorize(card, reason: reasonText, offerRemember: key != nil,
-                                               isCancelled: { clientFD.map(Broker.peerClosed) ?? false })
-        if let why = result.error { return why }
-        if let key, result.remember { Approver.shared.remember(key, card: card) }
-        return nil
+    /// Every request is listed in `sx pending` while it waits; with `context.terminal` it can also be
+    /// approved there (`sx approve`), which closes the card.
+    func approve(_ card: ApprovalPanel.Request, reason: String, key: String?, clientFD: Int32? = nil,
+                 context: ApprovalContext? = nil) -> String? {
+        let ctx = context ?? ApprovalContext(kind: "other", what: reason)
+        let prod = card.isProduction
+        // Timed grants (card "Allow for N h", `sx approve --for`) never cover prod; the single retry a
+        // human approved in a terminal does.
+        func granted() -> Bool {
+            if let key, Approver.shared.isApproved(key) { return true }
+            if !prod, let c = ctx.classKey, c != key, Approver.shared.isApproved(c) { return true }
+            if ctx.terminal, let c = ctx.classKey, Approver.shared.isApproved(GrantTable.onceKey(c)) { return true }
+            return false
+        }
+        if granted() { return nil }
+
+        guard let id = PendingRegistry.shared.add(
+            PendingInfo(kind: ctx.kind, what: ctx.what, who: card.who, agent: card.isAgent ? card.who : nil, chain: ctx.chain,
+                        command: card.command, argv: ctx.argv, cwd: card.project, names: card.secrets, host: ctx.host, hostKey: ctx.hostKey,
+                        prod: prod, terminal: ctx.terminal, canGrant: ctx.canGrant && !prod, retryable: ctx.retryable),
+            classKey: ctx.classKey ?? UUID().uuidString, wideKey: prod ? nil : ctx.wideKey) else {
+            return "too many requests are waiting for approval; try again later"
+        }
+        var endState = PendingInfo.State.expired
+        defer { PendingRegistry.shared.end(id, state: endState) }
+        let cancelled = { clientFD.map(Broker.peerClosed) ?? false }
+        let safeReason = DisplayText.safe(reason)
+        let reasonText = safeReason.count > 180 ? String(safeReason.prefix(177)) + "…" : safeReason
+        let started = Date()
+
+        // One card at a time. Requests behind it wait here, listed as pending and approvable from a terminal.
+        while true {
+            if PendingRegistry.shared.approvedInTerminal(id) || granted() {
+                endState = PendingInfo.State.approved
+                return nil
+            }
+            if cancelled() { return "the requesting program exited" }
+            if Date().timeIntervalSince(started) > Self.queueLimit { return "timed out waiting for approval" }
+            if approvalGate.try() {
+                defer { approvalGate.unlock() }
+                if PendingRegistry.shared.approvedInTerminal(id) || granted() {
+                    endState = PendingInfo.State.approved
+                    return nil
+                }
+                PendingRegistry.shared.setDeadline(id, Date().addingTimeInterval(Approver.answerTimeout))
+                let result = Approver.shared.authorize(card, reason: reasonText, offerRemember: key != nil, isCancelled: cancelled,
+                                                       external: { PendingRegistry.shared.approvedInTerminal(id) ? .approved(remember: false) : nil })
+                if let why = result.error {
+                    if PendingRegistry.shared.approvedInTerminal(id), !cancelled() {
+                        endState = PendingInfo.State.approved // approved in a terminal as the card timed out
+                        return nil
+                    }
+                    if why == "denied by user" { endState = PendingInfo.State.denied }
+                    return why
+                }
+                endState = PendingInfo.State.approved
+                if let key, result.remember { Approver.shared.remember(key, card: card) }
+                return nil
+            }
+            usleep(250_000)
+        }
     }
+
+    /// A request queued behind other cards gives up after this long.
+    static let queueLimit: TimeInterval = 600
+
+    /// Process chain of a peer for display: executable names, nearest first.
+    static func chain(_ pid: pid_t) -> [String] {
+        AgentDetect.ancestry(from: pid).prefix(6).map { ($0 as NSString).lastPathComponent }
+    }
+
+    /// Serializes limiter check, password check and limiter update, so parallel guesses cannot overrun the
+    /// limit, and keeps `sx approvals off` from landing in the middle of an attempt.
+    static let passwordLock = NSLock()
+
+    /// `sx approve`: the account password, typed at a real terminal. Whoever started the command, only the
+    /// password (which the owner alone knows) approves; it is checked here, never by the CLI.
+    private func approveFromTerminal(_ req: BrokerRequest, peer: PeerIdentity,
+                                     audit: (_ names: [String], _ outcome: String, _ chain: String) -> Void) -> BrokerResponse {
+        let ancestry = AgentDetect.ancestry(from: peer.pid)
+        let chainText = ancestry.prefix(6).map { ($0 as NSString).lastPathComponent }.joined(separator: " ← ")
+        if let why = TerminalApproval.refusal(controllingTTY: AgentDetect.controllingTTY(of: peer.pid),
+                                              stdinPath: AgentDetect.descriptorPath(of: peer.pid, fd: 0)) {
+            audit([], "refused: \(why)", chainText)
+            return .fail("refused: \(why)")
+        }
+        let ids = req.ids ?? []
+        guard !ids.isEmpty, ids.count <= 64 else { return .fail("which requests? see `sx pending`") }
+        if let s = req.seconds, s < 60 || TimeInterval(s) > TerminalApproval.maxGrant {
+            return .fail("--for must be between 1 minute and \(Int(TerminalApproval.maxGrant / 3600)) hours")
+        }
+        let anyHost = req.anyHost ?? false
+        let entries: [PendingTable.Entry]
+        switch PendingRegistry.shared.check(ids, tokens: req.tokens ?? [], seconds: req.seconds, anyHost: anyHost) {
+        case let .failure(e): return .fail(e.description)
+        case let .success(list): entries = list
+        }
+
+        Self.passwordLock.lock()
+        let state = TerminalApprovalStore.load()
+        if let why = state.refusal() {
+            Self.passwordLock.unlock()
+            audit([], "refused: \(why)", chainText)
+            return .fail(why)
+        }
+        // The attempt counts as failed until it succeeds (begun before the check), so an attempt that
+        // cannot be recorded is not made (fail closed) and a crash mid-check still counts.
+        do {
+            try TerminalApprovalStore.update { $0.beginAttempt() }
+        } catch {
+            Self.passwordLock.unlock()
+            audit([], "refused: cannot record the attempt: \(error)", chainText)
+            return .fail("cannot record the attempt in the keychain (\(error)); not checking the password")
+        }
+        let ok = AccountPassword.verify(req.password ?? "")
+        var since = 0
+        let after = try? TerminalApprovalStore.update { since = $0.finishAttempt(ok: ok) }
+        Self.passwordLock.unlock()
+        guard ok else {
+            audit(entries.flatMap(\.info.names), "wrong password", chainText)
+            if let after, !after.enabled { return .fail("wrong password; terminal approvals are now off (\(after.disabledReason ?? "")). Turn them on at the Mac: `sx approvals on`") }
+            return .fail("wrong password (\(after?.attemptsLeft() ?? 0) more tries before a lock)")
+        }
+        let lines = PendingRegistry.shared.apply(entries, seconds: req.seconds, anyHost: anyHost)
+        for (e, line) in zip(entries, lines) {
+            let how = req.seconds.map { "for \($0 / 60) min, \(PendingRegistry.scope(e.info, anyHost: anyHost))" } ?? "once"
+            audit(e.info.names, "approved #\(e.info.id) in terminal (\(how)) for \(e.info.who): \(line)", chainText)
+        }
+        var out = lines
+        if since > 0 {
+            out.append("⚠ \(since) wrong password\(since == 1 ? "" : "s") since your last approval (not yours? something is guessing: `sx approvals off`)")
+            audit([], "\(since) wrong passwords since the previous approval", chainText)
+        }
+        return BrokerResponse(ok: true, lines: out)
+    }
+
+    /// `sx approvals on|off|status`.
+    private func approvals(_ req: BrokerRequest, peer: PeerIdentity, approve: (ApprovalPanel.Request, String) -> String?,
+                           audit: (String) -> Void) throws -> BrokerResponse {
+        switch req.name {
+        case "on":
+            let card = ApprovalPanel.Request(title: "wants to allow approvals from a terminal", who: req.agent ?? "Terminal",
+                                             isAgent: req.agent != nil, command: "sx approvals on", project: nil, secrets: [], alwaysAsk: true,
+                                             note: "Then `sx approve` in a terminal accepts your login password instead of Touch ID.")
+            if let why = approve(card, "Allow approving sx requests from a terminal with your login password") {
+                audit("denied terminal approvals on: \(why)")
+                return .fail("not turned on: \(why)")
+            }
+            try TerminalApprovalStore.update { $0.turnOn() }
+            audit("terminal approvals on")
+            return BrokerResponse(ok: true, lines: ["✓ terminal approvals on: `sx approve ID` takes your login password"])
+        case "off":
+            // Like revoke: taking power away needs no proof.
+            Self.passwordLock.lock()
+            defer { Self.passwordLock.unlock() }
+            try TerminalApprovalStore.update { $0.turnOff() }
+            audit("terminal approvals off")
+            return BrokerResponse(ok: true, lines: ["✓ terminal approvals off (turning them on again needs Touch ID)"])
+        default:
+            let s = TerminalApprovalStore.load()
+            var lines = [s.enabled ? "terminal approvals: on" : "terminal approvals: off\(s.disabledReason.map { " (\($0))" } ?? "")"]
+            if s.enabled { lines.append("wrong passwords in 24 h: \(s.failures.count) (\(s.failuresSinceSuccess()) since the last approval); tries left now: \(s.attemptsLeft())") }
+            if let why = s.refusal(), s.enabled { lines.append(why) }
+            return BrokerResponse(ok: true, lines: lines)
+        }
+    }
+}
+
+/// What `sx pending` shows about a request and what approving it covers.
+struct ApprovalContext {
+    var kind: String
+    var what: String
+    /// Can be approved with `sx approve` (SSH signatures, `sx run` secrets). Deletes, exports, trust: Touch ID only.
+    var terminal = false
+    /// The request class a single approval (retry) or `--for` covers.
+    var classKey: String?
+    /// SSH only: the key for any server (`--for … --any-host`), the same class the card's "Allow for N h" remembers.
+    var wideKey: String?
+    var chain: [String] = []
+    /// `sx run`: the command as separate arguments, shown shell-quoted.
+    var argv: [String]?
+    var host: String?
+    var hostKey: String?
+    var canGrant = false
+    /// False when the class is unique to this request (approving it after it gave up would match nothing).
+    var retryable = true
 }
 
 extension Broker {

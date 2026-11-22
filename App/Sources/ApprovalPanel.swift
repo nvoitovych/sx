@@ -2,6 +2,7 @@ import AppKit
 import LocalAuthentication
 import LocalAuthenticationEmbeddedUI
 import SwiftUI
+import SxCore
 
 /// Floating request card. macOS will not let a background app pop a Touch ID prompt on its own
 /// (cooperative activation cancels it with -4); the user's click on Approve activates the app first.
@@ -35,15 +36,19 @@ final class ApprovalPanel {
 
     private static var current: NSPanel?
     private static var currentAuth: CardAuth?
+    private static var currentID: UUID?
 
-    static func dismiss() {
+    /// Closes the card on screen; with `id`, only if it is still that card (not one shown since).
+    static func dismiss(id: UUID? = nil) {
+        if let id, id != currentID { return }
         currentAuth?.invalidate()
         current?.close()
         current = nil
         currentAuth = nil
+        currentID = nil
     }
 
-    static func show(_ request: Request, reason: String, onOutcome: @escaping (Outcome) -> Void) {
+    static func show(_ request: Request, reason: String, id: UUID = UUID(), onOutcome: @escaping (Outcome) -> Void) {
         current?.close()
         // Non-activating, like Spotlight: it can appear inside another app's full-screen Space and
         // take keys (Esc) without activating sx or switching Spaces.
@@ -69,12 +74,13 @@ final class ApprovalPanel {
             answered = true
             auth.invalidate()
             panel.close()
-            if current === panel { current = nil; currentAuth = nil }
+            if current === panel { current = nil; currentAuth = nil; currentID = nil }
             onOutcome(outcome)
         }
         // The hidden title bar would otherwise push the content down by its height.
         panel.contentView = NSHostingView(rootView: ApprovalView(request: request, auth: auth).ignoresSafeArea())
         currentAuth = auth
+        currentID = id
         panel.setContentSize(panel.contentView!.fittingSize)
         let f = activeScreen().visibleFrame
         panel.setFrameTopLeftPoint(NSPoint(x: f.maxX - panel.frame.width - 16, y: f.maxY - 16))
@@ -211,7 +217,7 @@ private struct ApprovalView: View {
                     }
                 }
                 if let note = request.note {
-                    Text(note).font(.caption).foregroundStyle(.secondary).padding(.top, 2)
+                    Text(DisplayText.safe(note)).font(.caption).foregroundStyle(.secondary).padding(.top, 2)
                 }
             }
             .padding(12)
@@ -278,7 +284,7 @@ private struct ApprovalView: View {
     private func field(_ k: String, _ v: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             label(k)
-            Text(v).font(.system(.callout, design: .monospaced)).textSelection(.enabled).lineLimit(3)
+            Text(DisplayText.safe(v)).font(.system(.callout, design: .monospaced)).textSelection(.enabled).lineLimit(3)
         }
     }
 
@@ -295,7 +301,7 @@ struct FlowChips: View {
     var body: some View {
         FlowLayout(spacing: 6) {
             ForEach(items, id: \.self) { item in
-                Text(item).font(.system(.caption, design: .monospaced))
+                Text(DisplayText.safe(item)).font(.system(.caption, design: .monospaced))
                     .padding(.horizontal, 7).padding(.vertical, 3)
                     .background(Color.accentColor.opacity(0.16), in: RoundedRectangle(cornerRadius: 5))
             }

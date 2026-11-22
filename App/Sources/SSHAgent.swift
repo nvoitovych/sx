@@ -48,8 +48,9 @@ final class SSHAgent {
         var pid: pid_t = 0
         var len = socklen_t(MemoryLayout<pid_t>.size)
         getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &pid, &len)
+        var bindings: [SSHHostBinding] = []
         while let message = readMessage(fd) {
-            let reply = handle(message, peer: pid, fd: fd)
+            let reply = handle(message, peer: pid, fd: fd, bindings: &bindings)
             var w = SSHWriter()
             w.uint32(UInt32(reply.count))
             guard (try? UnixSocket.writeAll(fd, w.data + reply)) != nil else { return }
@@ -75,7 +76,7 @@ final class SSHAgent {
         return out
     }
 
-    private func handle(_ message: Data, peer: pid_t, fd: Int32) -> Data {
+    private func handle(_ message: Data, peer: pid_t, fd: Int32, bindings: inout [SSHHostBinding]) -> Data {
         let failure = Data([SSHAgentMessage.failure])
         var r = SSHReader(message)
         guard let type = try? r.byte() else { return failure }
@@ -100,22 +101,70 @@ final class SSHAgent {
             let agent = AgentDetect.detect(pid: peer)
             let who = agent ?? "Terminal"
             let prod = KeychainStore.tags(k.name).contains("prod")
+
+            // What is signed, and for which server. A login bound (session-bind) to a server's host key is
+            // tied to that key; the alias on the ssh command line is only what the caller says (shown, never
+            // trusted). `ssh-keygen -Y sign` data is tied to its namespace (e.g. "git"). Anything else —
+            // a login without a verified server, a forwarded agent, unknown data — can only be approved once,
+            // live: its class is unique, so no grant or retry can match another request.
+            let data = Data(payload)
+            let label = SSHDestination.host(argv: AgentDetect.arguments(of: peer) ?? []) // escaped where shown
+            let bound = SSHUserAuthRequest.boundHost(payload: data, bindings: bindings, key: blob)
+            let hostKey = bound?.hostKeyFingerprint
+            let isLogin = SSHUserAuthRequest(payload: data) != nil
+            let namespace = isLogin ? nil : SSHSignedData.namespace(data)
+            let forwarded = bindings.contains(where: \.isForwarding)
+            let what: String
+            let scope: String
+            if let hostKey {
+                what = "sign in with \(k.name) to the server with host key \(hostKey) (caller calls it \(label ?? "?"))"
+                scope = "login:hk:" + hostKey
+            } else if let namespace {
+                what = "sign data in namespace \"\(namespace)\" with \(k.name) (\(ancestry.first ?? "?"))"
+                scope = "data:ns:" + namespace
+            } else if isLogin {
+                what = "sign in with \(k.name) to \(label ?? "a server") — server NOT verified\(forwarded ? " (forwarded agent)" : "")"
+                scope = "once:" + UUID().uuidString
+            } else {
+                what = "sign unknown data with \(k.name) (\(ancestry.first ?? "?"))"
+                scope = "once:" + UUID().uuidString
+            }
+            let target = hostKey.map { " → host key \($0) (\(label ?? "?"))" } ?? namespace.map { " → data \"\($0)\"" } ?? (isLogin ? " → \(label ?? "?") (not verified)" : "")
+            let chainText = ancestry.joined(separator: " ← ") + target
+
             let card = ApprovalPanel.Request(title: "wants to sign in with an SSH key", who: who, isAgent: agent != nil,
                                              command: ancestry.joined(separator: " ← "),
-                                             project: nil, secrets: [k.name], alwaysAsk: prod, isProduction: prod)
-            let key = prod ? nil : Approver.shared.key(cwd: "ssh", argv: [agent ?? "human"], names: [k.name])
-            if let why = Broker.shared.approve(card, reason: "\(who) wants to sign with \(k.name)", key: key, clientFD: fd) {
+                                             project: nil, secrets: [k.name], alwaysAsk: prod, isProduction: prod,
+                                             note: what)
+            let actor = agent ?? "human"
+            let wideKey = Approver.shared.key(cwd: "ssh", argv: [actor], names: [k.name])
+            let classKey = Approver.shared.key(cwd: "ssh", argv: [actor, "class=" + scope], names: [k.name])
+            let context = ApprovalContext(kind: "ssh-sign", what: what, terminal: true, classKey: classKey, wideKey: wideKey,
+                                          chain: Array(ancestry), host: label, hostKey: hostKey,
+                                          canGrant: hostKey != nil || namespace != nil, retryable: hostKey != nil || namespace != nil)
+            if let why = Broker.shared.approve(card, reason: "\(who) wants to sign with \(k.name)\(target)", key: prod ? nil : wideKey,
+                                               clientFD: fd, context: context) {
                 AuditLog.shared.record(.init(time: Date(), op: "ssh-sign", client: ancestry.first ?? "?", agent: agent,
-                                             command: ancestry.joined(separator: " ← "), names: [k.name], outcome: "denied: \(why)"))
+                                             command: chainText, names: [k.name], outcome: "denied: \(why)"))
                 return failure
             }
             guard let sig = try? k.key.sign(Data(payload), flags: flags) else { return failure }
             AuditLog.shared.record(.init(time: Date(), op: "ssh-sign", client: ancestry.first ?? "?", agent: agent,
-                                         command: ancestry.joined(separator: " ← "), names: [k.name], outcome: "signed"))
+                                         command: chainText, names: [k.name], outcome: "signed"))
             var w = SSHWriter()
             w.byte(SSHAgentMessage.signResponse)
             w.string(Array(sig))
             return w.data
+
+        case SSHAgentMessage.extension:
+            // Only session-bind, and only with a valid host signature. As in OpenSSH's agent: forwarding hops
+            // first, then at most one binding for authentication; nothing after it. With any forwarding hop,
+            // sign requests get no server-limited approval (see `boundHost`).
+            guard let b = SSHHostBinding(extensionBody: Data(message.dropFirst())), b.isValid else { return failure }
+            if let last = bindings.last, !last.isForwarding { return failure }
+            guard bindings.count < 16 else { return failure }
+            bindings.append(b)
+            return Data([SSHAgentMessage.success])
 
         default:
             return failure
