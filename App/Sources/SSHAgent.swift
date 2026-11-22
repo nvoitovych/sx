@@ -108,11 +108,11 @@ final class SSHAgent {
             // a login without a verified server, a forwarded agent, unknown data — can only be approved once,
             // live: its class is unique, so no grant or retry can match another request.
             let data = Data(payload)
-            let label = SSHDestination.host(argv: AgentDetect.arguments(of: peer) ?? []).map(DisplayText.safe)
+            let label = SSHDestination.host(argv: AgentDetect.arguments(of: peer) ?? []) // escaped where shown
             let bound = SSHUserAuthRequest.boundHost(payload: data, bindings: bindings, key: blob)
             let hostKey = bound?.hostKeyFingerprint
             let isLogin = SSHUserAuthRequest(payload: data) != nil
-            let namespace = isLogin ? nil : SSHSignedData.namespace(data).map(DisplayText.safe)
+            let namespace = isLogin ? nil : SSHSignedData.namespace(data)
             let forwarded = bindings.contains(where: \.isForwarding)
             let what: String
             let scope: String

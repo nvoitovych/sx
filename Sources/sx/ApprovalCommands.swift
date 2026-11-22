@@ -184,7 +184,7 @@ enum ApprovalCommands {
         }
         let command = p.argv.map(DisplayText.shellQuoted) ?? DisplayText.safe(p.command ?? "?")
         let cwd = DisplayText.safe(((p.cwd ?? "?") as NSString).abbreviatingWithTildeInPath)
-        return "this command line, \(command), in \(cwd) with \(p.names.joined(separator: ", ")) (what the command does can still change, e.g. package.json scripts)"
+        return "this command line, \(command), in \(cwd) with \(p.names.map(DisplayText.safe).joined(separator: ", ")) (what the command does can still change, e.g. package.json scripts)"
     }
 
     static func clock(_ d: Date) -> String { d.formatted(date: .omitted, time: .standard) }

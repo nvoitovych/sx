@@ -159,10 +159,10 @@ public struct GrantTable {
     }
 
     /// Adding to an existing grant keeps the wider of the two: the later expiry, unlimited uses over counted.
-    public mutating func add(key: String, info: GrantInfo, uses: Int? = nil) {
+    public mutating func add(key: String, info: GrantInfo, uses: Int? = nil, now: Date = Date()) {
         var info = info
         var uses = uses
-        if let old = grants[key] {
+        if let old = grants[key], old.info.until > now {
             if old.info.until > info.until { info.until = old.info.until }
             uses = old.uses == nil || uses == nil ? nil : (old.uses ?? 0) + (uses ?? 0)
         }
@@ -220,7 +220,8 @@ public struct PendingTable {
         case expired
     }
 
-    /// More waiting requests than this are refused at once (a flood must not bury real requests).
+    /// More waiting requests than this from one requester are refused at once (a flood must not bury
+    /// real requests). Touch-ID-only requests (deletes, exports, trust, `approvals on`) are never refused.
     public static let maxWaiting = 32
     /// Finished requests kept for `sx pending` (the oldest go first).
     public static let maxKept = 200
@@ -233,7 +234,10 @@ public struct PendingTable {
     /// Nil when too many requests are already waiting.
     public mutating func add(_ info: PendingInfo, classKey: String, wideKey: String?, now: Date = Date()) -> Int? {
         prune(now: now)
-        guard entries.values.filter({ $0.info.state == PendingInfo.State.waiting }).count < Self.maxWaiting else { return nil }
+        if info.terminal {
+            let same = entries.values.filter { $0.info.state == PendingInfo.State.waiting && $0.info.terminal && $0.info.who == info.who }
+            guard same.count < Self.maxWaiting else { return nil }
+        }
         var info = info
         info.id = nextID
         info.token = UUID().uuidString

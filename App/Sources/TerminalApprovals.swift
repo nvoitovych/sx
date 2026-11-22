@@ -93,7 +93,6 @@ final class PendingRegistry {
                 let key = anyHost ? (e.wideKey ?? e.classKey) : e.classKey
                 Approver.shared.remember(key, info: GrantInfo(who: e.info.who, scope: Self.scope(e.info, anyHost: anyHost),
                                                               names: e.info.names, until: until, via: "terminal"))
-                if state == .expired { Self.rememberOnce(e) } // prod never reaches here; keeps the retry independent of the class
                 lines.append("✓ #\(id) approved\(state == .expired ? " — its next try passes" : ""); the same kind of request passes until \(Self.clock(until))")
             } else if state == .expired {
                 let until = Self.rememberOnce(e)

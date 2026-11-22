@@ -28,11 +28,12 @@ public enum DisplayText {
 
     /// A command line as a shell would need it typed, so `["npm test"]` and `["npm", "test"]` differ.
     public static func shellQuoted(_ argv: [String]) -> String {
-        argv.map { arg in
+        // Escape each argument first, then quote: the quoting's own `'\''` must stay as typed.
+        argv.map(safe).map { arg in
             let plain = !arg.isEmpty && arg.unicodeScalars.allSatisfy {
                 CharacterSet.alphanumerics.contains($0) && $0.isASCII || "@%+=:,./_-".unicodeScalars.contains($0)
             }
             return plain ? arg : "'" + arg.replacingOccurrences(of: "'", with: "'\\''") + "'"
-        }.map(safe).joined(separator: " ")
+        }.joined(separator: " ")
     }
 }

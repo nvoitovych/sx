@@ -301,7 +301,7 @@ struct FlowChips: View {
     var body: some View {
         FlowLayout(spacing: 6) {
             ForEach(items, id: \.self) { item in
-                Text(item).font(.system(.caption, design: .monospaced))
+                Text(DisplayText.safe(item)).font(.system(.caption, design: .monospaced))
                     .padding(.horizontal, 7).padding(.vertical, 3)
                     .background(Color.accentColor.opacity(0.16), in: RoundedRectangle(cornerRadius: 5))
             }

@@ -843,9 +843,13 @@ struct TerminalApprovalsSetting: View {
 
     private func set(_ on: Bool) {
         guard on else {
-            Broker.passwordLock.lock()
-            state = (try? TerminalApprovalStore.update { $0.turnOff() }) ?? TerminalApprovalStore.load()
-            Broker.passwordLock.unlock()
+            // Off waits for an attempt in progress (Open Directory, keychain): not on the main thread.
+            DispatchQueue.global().async {
+                Broker.passwordLock.lock()
+                let updated = (try? TerminalApprovalStore.update { $0.turnOff() }) ?? TerminalApprovalStore.load()
+                Broker.passwordLock.unlock()
+                DispatchQueue.main.async { state = updated }
+            }
             return
         }
         let card = ApprovalPanel.Request(title: "wants to allow approvals from a terminal", who: "You", command: nil,

@@ -150,7 +150,7 @@ macOS login password for nv:
 
 - `sx approve ID…` or `--all` approves once; a request that already timed out passes on its next try (within 15 min). `--for 8h` (at most 24 h) also remembers the same kind of request:
   - SSH login: this key **for that server only**, identified by the host key the server proves to the agent (`session-bind@openssh.com`, sent by OpenSSH 8.9+). The name the caller typed (`batman`) is shown but never trusted: anyone can repoint it in `~/.ssh/config`. Compare the host key fingerprint with the one you know.
-  - `ssh-keygen -Y sign` (e.g. git commit signing): this key for that namespace (`git`).
+  - `ssh-keygen -Y sign` (e.g. git commit signing): this key for that namespace (`git`) — for the whole time, the agent can sign any commit or tag with it.
   - `sx run`: this command line in this project with these secrets (what the command does can still change, e.g. `package.json` scripts).
   - Anything else (a login whose server is not verified, a forwarded agent, unknown data) can only be approved once while it waits. `--for 8h --any-host` allows the key for everything.
 - Every listed request carries a token that `sx approve` sends back: if Sx.app restarted and the numbers were reused, the old number approves nothing. Text from the requester (command lines, paths, host names) is shown with control and invisible characters escaped and arguments shell-quoted.

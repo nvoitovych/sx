@@ -258,7 +258,8 @@ final class Broker {
         var endState = PendingInfo.State.expired
         defer { PendingRegistry.shared.end(id, state: endState) }
         let cancelled = { clientFD.map(Broker.peerClosed) ?? false }
-        let reasonText = reason.count > 180 ? String(reason.prefix(177)) + "…" : reason
+        let safeReason = DisplayText.safe(reason)
+        let reasonText = safeReason.count > 180 ? String(safeReason.prefix(177)) + "…" : safeReason
         let started = Date()
 
         // One card at a time. Requests behind it wait here, listed as pending and approvable from a terminal.

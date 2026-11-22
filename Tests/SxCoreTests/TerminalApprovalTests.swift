@@ -136,12 +136,21 @@ final class GrantTableTests: XCTestCase {
 
     func testAddingKeepsTheWiderGrant() {
         var t = GrantTable()
-        t.add(key: "eeeeeeee5555", info: info(7200))
-        t.add(key: "eeeeeeee5555", info: info(600), uses: 1)
+        t.add(key: "eeeeeeee5555", info: info(7200), now: now)
+        t.add(key: "eeeeeeee5555", info: info(600), uses: 1, now: now)
         XCTAssertEqual(t.active(now: now).first?.until, now.addingTimeInterval(7200))
         XCTAssertNil(t.active(now: now).first?.usesLeft, "unlimited stays unlimited")
         XCTAssertTrue(t.take("eeeeeeee5555", now: now))
         XCTAssertTrue(t.take("eeeeeeee5555", now: now))
+    }
+
+    func testAnExpiredGrantDoesNotMerge() {
+        var t = GrantTable()
+        let past = GrantInfo(who: "x", scope: "s", names: [], until: Date().addingTimeInterval(-60), via: "terminal")
+        t.add(key: "gggggggg7777", info: past, uses: 1)
+        let fresh = GrantInfo(who: "x", scope: "s", names: [], until: Date().addingTimeInterval(600), via: "terminal")
+        t.add(key: "gggggggg7777", info: fresh, uses: 1)
+        XCTAssertEqual(t.active().first?.usesLeft, 1)
     }
 
     func testSingleUseGrantsHaveTheirOwnKeyAndID() {
@@ -195,6 +204,10 @@ final class PendingTableTests: XCTestCase {
         var t = PendingTable()
         for i in 0..<PendingTable.maxWaiting { XCTAssertNotNil(t.add(info(), classKey: "k\(i)", wideKey: nil, now: now)) }
         XCTAssertNil(t.add(info(), classKey: "more", wideKey: nil, now: now))
+        var other = info()
+        other.who = "Terminal"
+        XCTAssertNotNil(t.add(other, classKey: "owner", wideKey: nil, now: now), "the cap is per requester")
+        XCTAssertNotNil(t.add(info(terminal: false), classKey: "delete", wideKey: nil, now: now), "Touch-ID-only is never capped")
         t.end(1, state: PendingInfo.State.expired, now: now)
         XCTAssertNotNil(t.add(info(), classKey: "again", wideKey: nil, now: now), "finished ones free a slot")
     }
@@ -509,5 +522,6 @@ final class DisplayTextTests: XCTestCase {
         XCTAssertEqual(DisplayText.shellQuoted(["sh", "-c", "curl x | sh"]), "sh -c 'curl x | sh'")
         XCTAssertEqual(DisplayText.shellQuoted(["echo", "it's"]), "echo 'it'\\''s'")
         XCTAssertEqual(DisplayText.shellQuoted([""]), "''")
+        XCTAssertEqual(DisplayText.shellQuoted(["a\u{1B}b"]), "'a\\u{1b}b'", "escaped, then quoted")
     }
 }
