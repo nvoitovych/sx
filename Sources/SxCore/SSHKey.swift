@@ -163,10 +163,12 @@ public struct SSHPrivateKey {
 /// SSH agent protocol message numbers (draft-miller-ssh-agent).
 public enum SSHAgentMessage {
     public static let failure: UInt8 = 5
+    public static let success: UInt8 = 6
     public static let requestIdentities: UInt8 = 11
     public static let identitiesAnswer: UInt8 = 12
     public static let signRequest: UInt8 = 13
     public static let signResponse: UInt8 = 14
+    public static let `extension`: UInt8 = 27
 }
 
 enum DER {

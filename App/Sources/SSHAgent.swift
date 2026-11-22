@@ -48,8 +48,9 @@ final class SSHAgent {
         var pid: pid_t = 0
         var len = socklen_t(MemoryLayout<pid_t>.size)
         getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &pid, &len)
+        var bindings: [SSHHostBinding] = []
         while let message = readMessage(fd) {
-            let reply = handle(message, peer: pid, fd: fd)
+            let reply = handle(message, peer: pid, fd: fd, bindings: &bindings)
             var w = SSHWriter()
             w.uint32(UInt32(reply.count))
             guard (try? UnixSocket.writeAll(fd, w.data + reply)) != nil else { return }
@@ -75,7 +76,7 @@ final class SSHAgent {
         return out
     }
 
-    private func handle(_ message: Data, peer: pid_t, fd: Int32) -> Data {
+    private func handle(_ message: Data, peer: pid_t, fd: Int32, bindings: inout [SSHHostBinding]) -> Data {
         let failure = Data([SSHAgentMessage.failure])
         var r = SSHReader(message)
         guard let type = try? r.byte() else { return failure }
@@ -100,22 +101,50 @@ final class SSHAgent {
             let agent = AgentDetect.detect(pid: peer)
             let who = agent ?? "Terminal"
             let prod = KeychainStore.tags(k.name).contains("prod")
+
+            // Which server: the alias typed on the ssh command line (for people) and, when ssh bound this
+            // connection to the server's host key, that key (what a host-limited approval is tied to).
+            let label = SSHDestination.host(argv: AgentDetect.arguments(of: peer) ?? [])
+            let bound = SSHUserAuthRequest.boundHost(payload: Data(payload), bindings: bindings)
+            let hostKey = bound?.hostKeyFingerprint
+            let isLogin = bound != nil || SSHUserAuthRequest(payload: Data(payload)) != nil
+            let hostText = isLogin ? "\(label ?? "a server")\(hostKey.map { " · host key \($0)" } ?? " · host key not verified")" : nil
+            let target = hostText.map { " → \($0)" } ?? ""
+            let chainText = ancestry.joined(separator: " ← ") + target
+
             let card = ApprovalPanel.Request(title: "wants to sign in with an SSH key", who: who, isAgent: agent != nil,
                                              command: ancestry.joined(separator: " ← "),
-                                             project: nil, secrets: [k.name], alwaysAsk: prod, isProduction: prod)
-            let key = prod ? nil : Approver.shared.key(cwd: "ssh", argv: [agent ?? "human"], names: [k.name])
-            if let why = Broker.shared.approve(card, reason: "\(who) wants to sign with \(k.name)", key: key, clientFD: fd) {
+                                             project: nil, secrets: [k.name], alwaysAsk: prod, isProduction: prod,
+                                             note: hostText.map { "To \($0)" })
+            let actor = agent ?? "human"
+            let wideKey = Approver.shared.key(cwd: "ssh", argv: [actor], names: [k.name])
+            let hostScope = hostKey.map { "hk:" + $0 } ?? "name:" + (label ?? "?")
+            let classKey = Approver.shared.key(cwd: "ssh", argv: [actor, "host=" + hostScope], names: [k.name])
+            let what = isLogin ? "sign in with \(k.name) to \(label ?? "?")" : "sign data with \(k.name) (\(ancestry.first ?? "?"), not a login)"
+            let context = ApprovalContext(kind: "ssh-sign", what: what, terminal: true, classKey: classKey, wideKey: wideKey,
+                                          chain: Array(ancestry), host: label, hostKey: hostKey, canGrant: hostKey != nil)
+            if let why = Broker.shared.approve(card, reason: "\(who) wants to sign with \(k.name)\(target)", key: prod ? nil : wideKey,
+                                               clientFD: fd, context: context) {
                 AuditLog.shared.record(.init(time: Date(), op: "ssh-sign", client: ancestry.first ?? "?", agent: agent,
-                                             command: ancestry.joined(separator: " ← "), names: [k.name], outcome: "denied: \(why)"))
+                                             command: chainText, names: [k.name], outcome: "denied: \(why)"))
                 return failure
             }
             guard let sig = try? k.key.sign(Data(payload), flags: flags) else { return failure }
             AuditLog.shared.record(.init(time: Date(), op: "ssh-sign", client: ancestry.first ?? "?", agent: agent,
-                                         command: ancestry.joined(separator: " ← "), names: [k.name], outcome: "signed"))
+                                         command: chainText, names: [k.name], outcome: "signed"))
             var w = SSHWriter()
             w.byte(SSHAgentMessage.signResponse)
             w.string(Array(sig))
             return w.data
+
+        case SSHAgentMessage.extension:
+            // Only session-bind, and only with a valid host signature. One server per connection;
+            // later binds are forwarding hops (sign requests then get no host-limited approval).
+            guard let b = SSHHostBinding(extensionBody: Data(message.dropFirst())), b.isValid else { return failure }
+            if !b.isForwarding, !bindings.isEmpty { return failure }
+            guard bindings.count < 16 else { return failure }
+            bindings.append(b)
+            return Data([SSHAgentMessage.success])
 
         default:
             return failure

@@ -801,6 +801,9 @@ struct SettingsView: View {
                 Button("Revoke all approvals now") { Approver.shared.revokeAll() }
                 Text("Secrets tagged `prod` ask every time regardless.").font(.caption).foregroundStyle(.secondary)
             }
+            Section("Terminal approvals") {
+                TerminalApprovalsSetting()
+            }
             Section("General") {
                 Toggle("Open at login", isOn: $launchAtLogin)
                     .onChange(of: launchAtLogin) { _, on in
@@ -822,5 +825,36 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .navigationTitle("Settings")
+    }
+}
+
+/// On/off for `sx approve` (login password in a terminal instead of Touch ID).
+struct TerminalApprovalsSetting: View {
+    @State private var state = Snapshot.isActive ? TerminalApprovalState() : TerminalApprovalStore.load()
+    @State private var note: String?
+
+    var body: some View {
+        Toggle("Approve from a terminal with the login password", isOn: Binding(get: { state.enabled }, set: { set($0) }))
+        Text("For working on this Mac from another device: `sx pending` lists waiting requests, `sx approve ID` approves them with your macOS login password. Agents cannot approve. Turning this on needs Touch ID.")
+            .font(.caption).foregroundStyle(.secondary)
+        if let reason = state.disabledReason, !state.enabled { Text("Turned off: \(reason)").font(.caption).foregroundStyle(.orange) }
+        if let note { Text(note).font(.caption).foregroundStyle(.red) }
+    }
+
+    private func set(_ on: Bool) {
+        guard on else {
+            state = (try? TerminalApprovalStore.update { $0.enabled = false; $0.disabledReason = nil; $0.failures = [] }) ?? TerminalApprovalStore.load()
+            return
+        }
+        let card = ApprovalPanel.Request(title: "wants to allow approvals from a terminal", who: "You", command: nil,
+                                         project: nil, secrets: [], alwaysAsk: true)
+        DispatchQueue.global().async {
+            let why = Approver.shared.authenticate(card, reason: "Allow approving sx requests from a terminal with your login password")
+            let updated = why == nil ? try? TerminalApprovalStore.update { $0.turnOn() } : nil
+            DispatchQueue.main.async {
+                note = why.map { "Not turned on: \($0)" }
+                state = updated ?? TerminalApprovalStore.load()
+            }
+        }
     }
 }
